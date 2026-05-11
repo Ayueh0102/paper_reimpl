@@ -6,7 +6,10 @@
 # but with max_steps reduced and log_every tightened.
 seed: 42
 batch_size: 16
-num_workers: 2
+# Windows DataLoader: keep workers=0 for the shakedown. The Windows spawn
+# protocol pickles the synthetic dataset closures; running in the main
+# process avoids the worker timeout that hung the first 200-step retry.
+num_workers: 0
 learning_rate: 1.0e-4
 weight_decay: 0.0
 grad_clip: 1.0

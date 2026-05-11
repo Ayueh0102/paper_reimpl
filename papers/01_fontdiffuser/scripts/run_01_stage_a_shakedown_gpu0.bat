@@ -15,6 +15,9 @@ for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMddHHmmss"
 set LOG=D:\Char\ayueh\paper_reimpl\logs\01_stage_a_shakedown_%DT%.log
 
 set PYTHONIOENCODING=utf-8
+REM Unbuffered stdout so we get per-step logs streamed live (not buffered
+REM until process exit).
+set PYTHONUNBUFFERED=1
 
 cd /d %PAPER_DIR%
 C:\Users\Ptri\.local\bin\uv.exe run python -m paper_reimpl_shared.runner.entrypoint ^
