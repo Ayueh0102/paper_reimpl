@@ -6,7 +6,7 @@ REM Synthetic-only — TTF adapter is deferred until 01 v3 completes.
 
 set REPO=D:\Char\ayueh\paper_reimpl\repo
 set PAPER_DIR=%REPO%\papers\02_hfh_font
-set DATA=%PAPER_DIR%\src\hfh_font\configs\data_stage_a.yaml
+set DATA=%PAPER_DIR%\src\hfh_font\configs\data_stage_a_shakedown.yaml
 set MODEL=%PAPER_DIR%\src\hfh_font\configs\model.yaml
 set TRAIN=%PAPER_DIR%\src\hfh_font\configs\train_stage_a_shakedown.yaml
 

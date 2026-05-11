@@ -1,0 +1,13 @@
+# Shakedown data — copies data_stage_a.yaml but bumps synthetic_length
+# so the single-epoch training loop in 02's train.py can reach max_steps=200.
+# At bs=8 we need synthetic_length >= 200*8 = 1600; bump to 3200 for headroom.
+image_size: 128
+n_refs: 4
+content_channels: [bitmap, sdf, skeleton]
+manifest: null
+synthetic_length: 3200
+synthetic_writer_vocab: 13
+synthetic_style_vocab: 13
+synthetic_char_vocab: 256
+synthetic_script_vocab: 4
+synthetic_seed: 20260511
