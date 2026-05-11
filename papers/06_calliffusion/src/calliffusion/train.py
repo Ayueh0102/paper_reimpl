@@ -180,6 +180,21 @@ def main(
     if wrapped_layers:
         print(f"[calliffusion] wrapped {wrapped_layers} cross-attn projections with LoRA")
 
+    # ------------------------------------------------------------------ warm-start
+    # Load weights from --init-ckpt before building the optimizer so the
+    # AdamW state is created with the loaded params. Weights-only,
+    # strict=False so we tolerate LoRA / text-encoder head differences
+    # across stages.
+    init_ckpt = getattr(args, "init_ckpt", None)
+    if init_ckpt:
+        blob = torch.load(init_ckpt, map_location=device, weights_only=False)
+        state = blob["model"] if isinstance(blob, dict) and "model" in blob else blob
+        missing, unexpected = unet.load_state_dict(state, strict=False)
+        print(
+            f"[calliffusion] warm-start from {init_ckpt} "
+            f"(missing={len(missing)} unexpected={len(unexpected)})"
+        )
+
     # ------------------------------------------------------------------ optim
     optim_params: list[torch.nn.Parameter] = [p for p in unet.parameters() if p.requires_grad]
     if wrapped_layers:
@@ -259,6 +274,28 @@ def main(
             break
 
     print(f"[calliffusion] done. final_step={step} final_loss={last_loss:.6f}")
+
+    if not args.dry_run:
+        ckpt_dir_raw = train_cfg.get("ckpt_dir")
+        if ckpt_dir_raw is not None:
+            from pathlib import Path as _P
+            ckpt_dir = _P(str(ckpt_dir_raw))
+            if not ckpt_dir.is_absolute():
+                # parents: [0]=calliffusion [1]=src [2]=06_calliffusion [3]=papers [4]=repo
+                ckpt_dir = _P(__file__).resolve().parents[4] / ckpt_dir
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            ckpt_path = ckpt_dir / "calliffusion_last.pt"
+            torch.save(
+                {
+                    "model": unet.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "step": step,
+                    "lora_wrapped": wrapped_layers,
+                },
+                ckpt_path,
+            )
+            print(f"[calliffusion] saved checkpoint -> {ckpt_path}")
+
     if args.dry_run:
         if not math.isfinite(last_loss):
             print("[calliffusion] DRY RUN FAILED — non-finite loss")

@@ -284,6 +284,17 @@ def main(
     model = build_dp_font(cfg).to(device)
     diffusion = _build_diffusion(train_cfg, device=device)
 
+    # Warm-start from --init-ckpt before optimizer build.
+    init_ckpt = getattr(args, "init_ckpt", None)
+    if init_ckpt:
+        blob = torch.load(init_ckpt, map_location=device, weights_only=False)
+        state = blob["model"] if isinstance(blob, dict) and "model" in blob else blob
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        print(
+            f"[dp_font] warm-start from {init_ckpt} "
+            f"(missing={len(missing)} unexpected={len(unexpected)})"
+        )
+
     pinn_weight = float(train_cfg.get("pinn_weight", 0.0))
     pinn_weights = dict(train_cfg.get("pinn_weights", {})) if train_cfg.get("pinn_weights") else None
     skeleton_idx = train_cfg.get("skeleton_channel_index")

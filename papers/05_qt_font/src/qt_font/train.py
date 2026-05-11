@@ -219,6 +219,20 @@ def main(
             "Manifest-backed dataset is a Phase 3 deliverable. Use --synthetic."
         )
 
+    # Warm-start from --init-ckpt before optimizer is built so AdamW moments
+    # are created from loaded params. Weights-only load with strict=False.
+    init_ckpt = getattr(args, "init_ckpt", None)
+    if init_ckpt:
+        blob = torch.load(init_ckpt, map_location=args.device, weights_only=False)
+        state = blob["model"] if isinstance(blob, dict) and "model" in blob else blob
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        logging.info(
+            "warm-start from %s (missing=%d unexpected=%d)",
+            init_ckpt,
+            len(missing),
+            len(unexpected),
+        )
+
     opt = torch.optim.AdamW(
         model.parameters(),
         lr=float(train_cfg.get("learning_rate", 1e-4)),
@@ -236,33 +250,58 @@ def main(
     logger.info("model params = %s", f"{sum(p.numel() for p in model.parameters()):,}")
     logger.info("qt_cfg = %s", asdict(qt_cfg))
     max_steps = int(train_cfg.get("max_steps", 10))
+    max_epochs = int(train_cfg.get("max_epochs", 1))
     log_every = int(train_cfg.get("log_every", 1))
     grad_clip = float(train_cfg.get("grad_clip", 1.0))
     grad_accum = max(1, int(train_cfg.get("grad_accum", 1)))
 
+    ckpt_dir_raw = train_cfg.get("ckpt_dir")
+    ckpt_dir = None
+    if ckpt_dir_raw is not None:
+        from pathlib import Path as _P
+        p = _P(str(ckpt_dir_raw))
+        if not p.is_absolute():
+            # parents: [0]=qt_font [1]=src [2]=05_qt_font [3]=papers [4]=repo
+            p = _P(__file__).resolve().parents[4] / p
+        if not args.dry_run:
+            p.mkdir(parents=True, exist_ok=True)
+        ckpt_dir = p
+
     step = 0
     micro = 0
     opt.zero_grad(set_to_none=True)
-    for batch in loader:
-        batch = {k: v.to(args.device) for k, v in batch.items()}
-        loss, log = compute_loss(model=model, diffusion=diffusion, batch=batch)
-        # Mean-reduce across the accumulation cycle so the .step() gradient is
-        # an unbiased estimate of the effective-batch gradient.
-        (loss / grad_accum).backward()
-        micro += 1
-        if micro >= grad_accum:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            opt.step()
-            opt.zero_grad(set_to_none=True)
-            micro = 0
-            step += 1
-            if step % log_every == 0:
-                logger.info("step=%d %s", step, log)
-            if args.dry_run:
-                logger.info("dry-run: stop after 1 step")
-                return 0
-            if step >= max_steps:
-                break
+    done = False
+    for epoch in range(max_epochs):
+        if done:
+            break
+        for batch in loader:
+            batch = {k: v.to(args.device) for k, v in batch.items()}
+            loss, log = compute_loss(model=model, diffusion=diffusion, batch=batch)
+            # Mean-reduce across the accumulation cycle so the .step() gradient is
+            # an unbiased estimate of the effective-batch gradient.
+            (loss / grad_accum).backward()
+            micro += 1
+            if micro >= grad_accum:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                opt.step()
+                opt.zero_grad(set_to_none=True)
+                micro = 0
+                step += 1
+                if step % log_every == 0:
+                    logger.info("step=%d %s", step, log)
+                if args.dry_run:
+                    logger.info("dry-run: stop after 1 step")
+                    return 0
+                if step >= max_steps:
+                    done = True
+                    break
 
+    if ckpt_dir is not None and not args.dry_run:
+        ckpt_path = ckpt_dir / "qt_font_last.pt"
+        torch.save(
+            {"model": model.state_dict(), "step": step, "cfg": asdict(qt_cfg)},
+            ckpt_path,
+        )
+        logger.info("saved checkpoint -> %s", ckpt_path)
     logger.info("training done; total_steps=%d", step)
     return 0

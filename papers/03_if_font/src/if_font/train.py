@@ -309,6 +309,18 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
         vq_adapter = VQTokenizerAdapter(cfg.vq)
     model = build_if_font(cfg, vq_adapter=vq_adapter).to(device)
 
+    # Warm-start from --init-ckpt before optimizer build.
+    init_ckpt = getattr(args, "init_ckpt", None)
+    if init_ckpt:
+        import torch as _torch
+        blob = _torch.load(init_ckpt, map_location=device, weights_only=False)
+        state = blob["model"] if isinstance(blob, dict) and "model" in blob else blob
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        print(
+            f"[if_font] warm-start from {init_ckpt} "
+            f"(missing={len(missing)} unexpected={len(unexpected)})"
+        )
+
     loader = _build_dataloader(
         args=args,
         data_cfg=data_cfg,

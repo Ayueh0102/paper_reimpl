@@ -220,6 +220,17 @@ def main(
     model = build_moyun(cfg).to(device)
     diffusion = _build_diffusion(train_cfg, device=device)
 
+    # Warm-start from --init-ckpt before optimizer build.
+    init_ckpt = getattr(args, "init_ckpt", None)
+    if init_ckpt:
+        blob = torch.load(init_ckpt, map_location=device, weights_only=False)
+        state = blob["model"] if isinstance(blob, dict) and "model" in blob else blob
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        print(
+            f"[moyun] warm-start from {init_ckpt} "
+            f"(missing={len(missing)} unexpected={len(unexpected)})"
+        )
+
     loader = _build_dataloader(
         args=args, data_cfg=data_cfg, model_cfg=cfg, train_cfg=train_cfg, paths=paths
     )

@@ -332,6 +332,19 @@ def _run_vqgan_stage(
     vqgan_cfg = _vqgan_cfg_from_yaml(model_cfg)
     model = build_vqgan(vqgan_cfg).to(device)
 
+    # Warm-start from --init-ckpt before optimizer build.
+    init_ckpt = getattr(args, "init_ckpt", None)
+    if init_ckpt:
+        blob = torch.load(init_ckpt, map_location=device, weights_only=False)
+        state = blob["model"] if isinstance(blob, dict) and "model" in blob else blob
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        logger.info(
+            "[vq_font/vqgan] warm-start from %s (missing=%d unexpected=%d)",
+            init_ckpt,
+            len(missing),
+            len(unexpected),
+        )
+
     # Build loss (LPIPS + Discriminator). ``simple_loss=True`` falls back to
     # pure L1 + commitment for dry-runs / smoke (no LPIPS download).
     simple_loss = bool(train_cfg.get("simple_loss", False)) or args.dry_run
