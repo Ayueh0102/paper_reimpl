@@ -17,6 +17,7 @@ Yields FontDiffuser-style batches:
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import random
@@ -52,6 +53,15 @@ def _ttf_path_for(fonts_root: Path, font_id: str) -> Path:
     return candidates[0]
 
 
+@functools.lru_cache(maxsize=256)
+def _cached_font(ttf_path_str: str, pt: int) -> ImageFont.FreeTypeFont:
+    """Cache parsed TTF fonts so render_glyph doesn't re-parse the whole
+    file on every call. Discovery alone calls this 13 fonts x 20k chars ~=
+    270k times; without the cache, on Windows the TTF reload dominates
+    runtime (~minutes vs. seconds with the cache)."""
+    return ImageFont.truetype(ttf_path_str, size=pt)
+
+
 def render_glyph(
     *,
     ttf_path: Path,
@@ -64,7 +74,7 @@ def render_glyph(
     Returns a uint8 array in [0, 255], white background (255), black ink (0).
     """
     pt = max(8, int(image_size * font_size_ratio))
-    font = ImageFont.truetype(str(ttf_path), size=pt)
+    font = _cached_font(str(ttf_path), pt)
     img = Image.new("L", (image_size, image_size), color=255)
     draw = ImageDraw.Draw(img)
     # textbbox gives the inked bounding box for the glyph at origin (0, 0).
