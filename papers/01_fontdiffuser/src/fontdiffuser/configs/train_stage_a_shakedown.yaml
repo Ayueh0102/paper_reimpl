@@ -10,7 +10,9 @@ num_workers: 2
 learning_rate: 1.0e-4
 weight_decay: 0.0
 grad_clip: 1.0
-max_epochs: 1
+# synthetic_length=64 + bs=16 => only 4 batches/epoch, so we need many epochs
+# to reach max_steps. The trainer cycles the synthetic dataset.
+max_epochs: 100
 max_steps: 200
 log_every: 20
 cfg_drop_prob: 0.1

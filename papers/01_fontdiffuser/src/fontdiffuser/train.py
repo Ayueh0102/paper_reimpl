@@ -335,7 +335,9 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
 
     ckpt_dir = train_cfg.get("ckpt_dir")
     if ckpt_dir is not None:
-        ckpt_dir = resolve_path(ckpt_dir, base=Path(__file__).resolve().parents[3])
+        # parents: [0]=fontdiffuser, [1]=src, [2]=01_fontdiffuser, [3]=papers,
+        # [4]=repo root. ckpt_dir yaml uses repo-root-relative paths.
+        ckpt_dir = resolve_path(ckpt_dir, base=Path(__file__).resolve().parents[4])
         os.makedirs(ckpt_dir, exist_ok=True)
 
     print(
