@@ -21,16 +21,28 @@ sshpass -p "$LAB_SSH_PASS" ssh -o StrictHostKeyChecking=no "$LAB_SSH_USER@$LAB_S
 
 | 項目 | 值 |
 |---|---|
-| GPU 數量 | **2 張**（user 原本估「單張」、實際是雙張）|
+| GPU 數量 | **2 張**（雙張可同時用）|
 | GPU 型號 | NVIDIA RTX 6000 Ada Generation |
 | VRAM | 48 GB / 卡（49140 MiB）|
 | CUDA Driver | 573.42 |
 | CUDA 版本 | 12.8 |
 | GPU Mode | WDDM（Windows 一般用，非 TCC）|
 
-**注意**：GPU 1 audit 當時被別人佔用（100% util，39.5 GB 已用，PID 26156 anaconda3 python.exe + PID 16524 anaconda3/envs/tools python.exe）。**我們訓練先綁 `cuda:0`**，並在訓練前 `nvidia-smi` 確認。
+**2026-05-11 狀態（user 確認）**：兩張 GPU 都已關閉佔用程序，皆閒置可用。
+- GPU 0: 317 MiB used / 0% util ✓
+- GPU 1: 5063 MiB used / 0% util ✓（LM Studio 常駐，不影響訓練）
 
-LM Studio 兩張卡都有 inference process，但只用 reserved memory，不影響我們訓練（pinning 後 LM Studio 會自動避讓）。
+## 平行訓練策略
+
+48GB VRAM × 2 張意味著 Phase 3 可以**雙路平行**，不必純 sequential：
+
+| 策略 | 同時跑 | 每模型 VRAM | wall-clock |
+|---|---|---|---|
+| Sequential (原 plan) | 1 paper | 整張卡 48GB | 16-32 days |
+| **2-way parallel（推薦）** | 2 papers，一張卡一個 | 整張卡 48GB | **8-16 days** |
+| 4-way parallel（激進）| 4 papers，每張卡塞 2 個 | 24GB/model | 4-8 days，但 CPU/IO 競爭風險 |
+
+**預設**：2-way parallel（保守、易 debug）。FontDiffuser shakedown 跑完 Stage A 後，若 VRAM 還寬鬆且資料 I/O 不卡，再評估升級到 4-way。
 
 ## 軟體環境
 
