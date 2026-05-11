@@ -47,6 +47,55 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+class _TTFPromptAdapter(Dataset):
+    """Wrap TTFCrossFontPairDataset and synthesize the prompt string that
+    Calliffusion's BERT text encoder expects.
+
+    Prompt template (matches the synthetic / manifest convention):
+        "{char} {script} {writer}"
+    where char is the target glyph char, script is mapped from the font's
+    script category, and writer is the target font_id (treated as the
+    writer for Stage A — Stage B/C will swap in real Ernantang writers).
+    """
+
+    SCRIPT_NAMES = {
+        "kai": "楷書", "xing": "行書", "cao": "草書",
+        "li": "隸書", "zhuan": "篆書", "hei": "黑體",
+        "ming": "明體", "decor": "藝術體", "unk": "未知",
+    }
+
+    def __init__(self, *, inner, prompt_dropout_p: float, seed: int) -> None:
+        super().__init__()
+        self.inner = inner
+        self.prompt_dropout_p = float(prompt_dropout_p)
+        self._rng = random.Random(seed)
+
+    def __len__(self) -> int:
+        return len(self.inner)
+
+    def writer_names(self) -> list[str]:
+        return list(self.inner.font_ids)
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        s = self.inner[idx]
+        meta = s.get("metadata", {})
+        char = meta.get("char", "?")
+        target_font = meta.get("target_font", "")
+        script_cat = self.inner._font_script.get(target_font, "unk")
+        script_name = self.SCRIPT_NAMES.get(script_cat, script_cat)
+        prompt = f"{char} {script_name} {target_font}"
+        if self.prompt_dropout_p > 0 and self._rng.random() < self.prompt_dropout_p:
+            prompt = ""
+        return {
+            "image": s["image"],
+            "prompt": prompt,
+            "char_id": int(s["char_id"]),
+            "script_id": int(s["script_id"]),
+            "writer_id": int(s["writer_id"]),
+            "metadata": {**meta, "prompt": prompt},
+        }
+
+
 def build_dataset(
     *,
     synthetic: bool,
@@ -55,6 +104,44 @@ def build_dataset(
     manifest_override: str | None = None,
 ) -> Dataset:
     image_size = int(data_cfg.get("image_size", 64))
+    source = str(data_cfg.get("source", "manifest")).lower()
+    if source == "ttf" and not synthetic:
+        from pathlib import Path as _P
+        from paper_reimpl_shared.data.ttf_pair_dataset import TTFCrossFontPairDataset
+
+        fonts_root_cfg = data_cfg.get("fonts_root")
+        if not fonts_root_cfg:
+            raise ValueError(
+                "06 source=ttf requires data_cfg.fonts_root (absolute path) — "
+                "Calliffusion's build_dataset doesn't have a BackendPaths handle."
+            )
+        fonts_root = _P(str(fonts_root_cfg))
+        ratio = float(data_cfg.get("font_size_ratio", 0.85))
+        cache_cfg = data_cfg.get("supported_chars_cache")
+        cache_path = _P(str(cache_cfg)) if cache_cfg else (
+            fonts_root / f".ttf_supported_chars_{image_size}px_{ratio}.json"
+        )
+        inner = TTFCrossFontPairDataset(
+            fonts_root=fonts_root,
+            font_ids=data_cfg.get("font_ids"),
+            image_size=image_size,
+            content_channels=1,
+            font_size_ratio=ratio,
+            length=int(data_cfg.get("ttf_epoch_length", 10000)),
+            ref_count=0,
+            seed=int(data_cfg.get("seed", 0)),
+            ensure_diff_source=bool(data_cfg.get("ensure_diff_source", True)),
+            cjk_start=int(data_cfg.get("cjk_start", 0x4E00)),
+            cjk_end=int(data_cfg.get("cjk_end", 0x9FFF)),
+            char_cache_path=cache_path,
+            script_categories=data_cfg.get("script_categories"),
+        )
+        return _TTFPromptAdapter(
+            inner=inner,
+            prompt_dropout_p=float(data_cfg.get("prompt_dropout_p", 0.1)),
+            seed=int(data_cfg.get("seed", 0)),
+        )
+
     if synthetic:
         return SyntheticPromptDataset(
             length=int(data_cfg.get("synthetic_length", 16)),

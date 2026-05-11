@@ -1,0 +1,23 @@
+# 03 Stage A — TTF cross-font pretrain with IDS-derived tokens.
+# ids_lookup_path points at the local IDS table on the lab server.
+source: ttf
+font_size_ratio: 0.85
+ttf_epoch_length: 20000
+max_refs: 3
+cjk_start: 0x4E00
+cjk_end: 0x9FFF
+ids_lookup_path: D:\Char\ayueh\paper_reimpl\data_snapshot\ids\cns_unicode_ids.tsv
+script_categories:
+  lxgw_wenkai_regular: kai
+  lxgw_wenkai_light: kai
+  lxgw_wenkai_medium: kai
+  ma_shan_zheng: xing
+  long_cang: cao
+  liu_jian_mao_cao: cao
+  zcool_xiaowei: ming
+  zcool_kuaile: decor
+  zcool_qingke_huangyou: hei
+  noto_sans_sc: hei
+  noto_sans_tc: hei
+  noto_serif_sc: ming
+  noto_serif_tc: ming

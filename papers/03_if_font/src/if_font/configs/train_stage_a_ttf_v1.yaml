@@ -1,0 +1,14 @@
+# 03 Stage A v1 — IF-Font cross-font pretrain (5000 step).
+# vqgan_pretrained=False uses the random-weight VQGAN stub (paper-faithful
+# would warm-start from CompVis vq-f8-n256; gated until we install taming-
+# transformers + omegaconf successfully on lab Windows).
+seed: 42
+batch_size: 4
+num_workers: 0
+base_learning_rate: 4.5e-6
+weight_decay: 0.01
+accumulate_grad_batches: 1
+max_epochs: 100
+max_steps: 5000
+log_every: 100
+ckpt_dir: papers/03_if_font/outputs/stage_a_ttf_v1

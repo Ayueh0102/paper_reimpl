@@ -205,7 +205,8 @@ def main(
         beta_end=float(diff_cfg.get("beta_end", 1.0)),
     ).to(args.device)
 
-    # Either synthetic (smoke / dry-run) or manifest (real run, not implemented).
+    # Routing: synthetic (smoke / dry-run), ttf (real cross-font pretrain),
+    # or manifest (real Stage B/C, not implemented).
     source = str(data_cfg.get("source", "synthetic")).lower()
     if args.synthetic or source == "synthetic":
         loader = _build_synthetic_loader(
@@ -214,9 +215,41 @@ def main(
             batch_size=int(train_cfg.get("batch_size", 2)),
             num_workers=int(train_cfg.get("num_workers", 0)),
         )
+    elif source == "ttf":
+        from pathlib import Path as _P
+        from .dataset import build_ttf_dataset
+
+        fonts_root_cfg = data_cfg.get("fonts_root")
+        if fonts_root_cfg:
+            fonts_root = _P(str(fonts_root_cfg))
+        else:
+            fonts_root = paths.ttf_root.parent / "fonts_free"
+        cache_cfg = data_cfg.get("supported_chars_cache")
+        cache_path = _P(str(cache_cfg)) if cache_cfg else None
+        ttf_ds = build_ttf_dataset(
+            fonts_root=fonts_root,
+            image_size=1 << qt_cfg.depth,
+            content_channels=qt_cfg.content_channels,
+            n_refs=int(data_cfg.get("max_refs", 1)),
+            font_size_ratio=float(data_cfg.get("font_size_ratio", 0.85)),
+            length=int(data_cfg.get("ttf_epoch_length", 10_000)),
+            seed=int(train_cfg.get("seed", 42)),
+            cjk_start=int(data_cfg.get("cjk_start", 0x4E00)),
+            cjk_end=int(data_cfg.get("cjk_end", 0x9FFF)),
+            char_cache_path=cache_path,
+            font_ids=data_cfg.get("font_ids"),
+            script_categories=data_cfg.get("script_categories"),
+        )
+        loader = DataLoader(
+            ttf_ds,
+            batch_size=int(train_cfg.get("batch_size", 2)),
+            shuffle=True,
+            num_workers=int(train_cfg.get("num_workers", 0)),
+            drop_last=False,
+        )
     else:  # pragma: no cover - placeholder
         raise NotImplementedError(
-            "Manifest-backed dataset is a Phase 3 deliverable. Use --synthetic."
+            f"Unknown source={source}; supported: synthetic, ttf, manifest (TBD)."
         )
 
     # Warm-start from --init-ckpt before optimizer is built so AdamW moments

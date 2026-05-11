@@ -337,6 +337,55 @@ class IFFontCollate:
 # --------------------------------------------------------------------------------------
 
 
+class _IFFontTTFAdapter(Dataset):
+    """Wrap TTFCrossFontPairDataset and inject IF-Font's IDS keys per item.
+    The shared collate (IFFontCollate) tokenizes ids_tokens to ids_token_ids
+    and computes coverage_sim from ref_chars vs target_char.
+
+    For TTF Stage A there are no real refs from a manifest, so we use the
+    TTF-emitted ref glyphs but their underlying chars are all the same as
+    the target (ensure_diff_source only enforces different *font*, not
+    different *char*). Coverage sim is therefore mostly 1.0 — fine for
+    pretrain plumbing.
+    """
+
+    def __init__(self, *, inner, ids_resolver, ids_lookup, max_refs: int) -> None:
+        super().__init__()
+        self.inner = inner
+        self.ids_resolver = ids_resolver
+        self.ids_lookup = ids_lookup or (lambda _ch: "")
+        self.max_refs = int(max_refs)
+
+    def __len__(self) -> int:
+        return len(self.inner)
+
+    def _resolved(self, ch: str) -> tuple[str, ...]:
+        if not ch:
+            return ()
+        if self.ids_resolver is not None:
+            try:
+                return self.ids_resolver.resolve(ch)
+            except (KeyError, RecursionError):
+                pass
+        return tuple(self.ids_lookup(ch))
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        s = self.inner[idx]
+        meta = s.get("metadata", {})
+        ch = str(meta.get("char", ""))
+        resolved = self._resolved(ch)
+        s = dict(s)
+        s["ids_string"] = "".join(resolved)
+        s["ids_tokens"] = resolved
+        s["target_char"] = ch
+        # Refs in TTF Stage A use the SAME target char (different font),
+        # so their IDS resolves identically.
+        ref_chars = [ch] * self.max_refs
+        s["ref_chars"] = ref_chars
+        s["ref_ids_tokens"] = [resolved for _ in ref_chars]
+        return s
+
+
 def build_dataset(
     *,
     args,
@@ -352,6 +401,44 @@ def build_dataset(
 
     use_synthetic = bool(getattr(args, "synthetic", False))
     source = str(data_cfg.get("source", "manifest")).lower()
+
+    if source == "ttf" and not use_synthetic:
+        from pathlib import Path as _P
+        from paper_reimpl_shared.data.ttf_pair_dataset import TTFCrossFontPairDataset
+
+        fonts_root_cfg = data_cfg.get("fonts_root")
+        if fonts_root_cfg:
+            fonts_root = _P(str(fonts_root_cfg))
+        else:
+            fonts_root = paths.ttf_root.parent / "fonts_free"
+        cache_cfg = data_cfg.get("supported_chars_cache")
+        ratio = float(data_cfg.get("font_size_ratio", 0.85))
+        cache_path = _P(str(cache_cfg)) if cache_cfg else (
+            fonts_root / f".ttf_supported_chars_{image_size}px_{ratio}.json"
+        )
+        inner = TTFCrossFontPairDataset(
+            fonts_root=fonts_root,
+            font_ids=data_cfg.get("font_ids"),
+            image_size=image_size,
+            content_channels=content_channels_n,
+            font_size_ratio=ratio,
+            length=int(data_cfg.get("ttf_epoch_length", 10000)),
+            ref_count=max_refs,
+            seed=int(data_cfg.get("seed", 42)),
+            ensure_diff_source=bool(data_cfg.get("ensure_diff_source", True)),
+            cjk_start=int(data_cfg.get("cjk_start", 0x4E00)),
+            cjk_end=int(data_cfg.get("cjk_end", 0x9FFF)),
+            char_cache_path=cache_path,
+            script_categories=data_cfg.get("script_categories"),
+        )
+        if ids_lookup is None:
+            ids_lookup = load_ids_lookup(data_cfg.get("ids_lookup_path"))
+        return _IFFontTTFAdapter(
+            inner=inner,
+            ids_resolver=ids_resolver,
+            ids_lookup=ids_lookup,
+            max_refs=max_refs,
+        )
 
     if use_synthetic or source == "synthetic":
         return _SyntheticIFFontDataset(

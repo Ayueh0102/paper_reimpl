@@ -1,0 +1,25 @@
+# 06 Stage A — TTF cross-font pretrain via shared TTFCrossFontPairDataset.
+# Prompts are synthesised as "{char} {script_name} {font_id}" per sample.
+source: ttf
+fonts_root: D:\Char\ayueh\paper_reimpl\data_snapshot\fonts_free
+font_size_ratio: 0.85
+ttf_epoch_length: 20000
+cjk_start: 0x4E00
+cjk_end: 0x9FFF
+image_size: 64
+prompt_dropout_p: 0.1
+seed: 42
+script_categories:
+  lxgw_wenkai_regular: kai
+  lxgw_wenkai_light: kai
+  lxgw_wenkai_medium: kai
+  ma_shan_zheng: xing
+  long_cang: cao
+  liu_jian_mao_cao: cao
+  zcool_xiaowei: ming
+  zcool_kuaile: decor
+  zcool_qingke_huangyou: hei
+  noto_sans_sc: hei
+  noto_sans_tc: hei
+  noto_serif_sc: ming
+  noto_serif_tc: ming

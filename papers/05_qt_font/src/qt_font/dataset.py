@@ -129,6 +129,77 @@ def build_dataset(cfg: SyntheticConfig) -> SyntheticDataset:
     return SyntheticDataset(cfg)
 
 
+class _TTFPairAdapter(torch.utils.data.Dataset):
+    """Wrap TTFCrossFontPairDataset to match the legacy `refs` batch key
+    that QT-Font's model.compute_loss and train.compute_loss read.
+
+    Shared TTF dataset emits `ref_images` (a list of [1, C, H, W] tensors).
+    QT's train loop expects either `refs` (already stacked) or `ref_images`.
+    We stack to `refs` here so DataLoader's default collate produces a
+    single [B, N, C, H, W] tensor without needing a custom collate_fn.
+    """
+
+    def __init__(self, inner) -> None:
+        super().__init__()
+        self.inner = inner
+
+    def __len__(self) -> int:
+        return len(self.inner)
+
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        s = self.inner[idx]
+        refs = s["ref_images"]
+        refs_t = torch.stack(refs, dim=0) if isinstance(refs, list) else refs
+        return {
+            "image": s["image"],
+            "content": s["content"],
+            "refs": refs_t,
+            "char_id": torch.as_tensor(s["char_id"], dtype=torch.long),
+            "writer_id": torch.as_tensor(s["writer_id"], dtype=torch.long),
+            "script_id": torch.as_tensor(s["script_id"], dtype=torch.long),
+        }
+
+
+def build_ttf_dataset(
+    *,
+    fonts_root,
+    image_size: int,
+    content_channels: int,
+    n_refs: int = 1,
+    font_size_ratio: float = 0.85,
+    length: int = 10_000,
+    seed: int = 42,
+    cjk_start: int = 0x4E00,
+    cjk_end: int = 0x9FFF,
+    char_cache_path=None,
+    font_ids: list[str] | None = None,
+    script_categories: dict | None = None,
+) -> _TTFPairAdapter:
+    """Real cross-font TTF dataset for QT-Font Stage A."""
+    from pathlib import Path
+    from paper_reimpl_shared.data.ttf_pair_dataset import TTFCrossFontPairDataset
+
+    fonts_root = Path(fonts_root)
+    if char_cache_path is None:
+        char_cache_path = fonts_root / f".ttf_supported_chars_{image_size}px_{font_size_ratio}.json"
+    inner = TTFCrossFontPairDataset(
+        fonts_root=fonts_root,
+        font_ids=font_ids,
+        image_size=image_size,
+        content_channels=content_channels,
+        font_size_ratio=font_size_ratio,
+        length=length,
+        ref_count=n_refs,
+        seed=seed,
+        ensure_diff_source=True,
+        cjk_start=cjk_start,
+        cjk_end=cjk_end,
+        char_cache_path=char_cache_path,
+        script_categories=script_categories,
+    )
+    return _TTFPairAdapter(inner)
+
+
 class ManifestPlaceholder(Dataset):
     """Stub for the manifest-backed Stage A/B/C dataset (Phase 3)."""
 

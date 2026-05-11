@@ -1,0 +1,20 @@
+# 08 Stage A v1 — TTF cross-font pretrain (5000 step).
+seed: 42
+batch_size: 16
+num_workers: 0
+learning_rate: 1.0e-4
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 100
+max_steps: 5000
+log_every: 100
+cfg_drop_prob: 0.1
+pinn_weight: 0.0  # PINN losses gated until real stroke data in Stage B/C
+ckpt_dir: papers/08_dp_font/outputs/stage_a_ttf_v1
+
+diffusion:
+  timesteps: 1000
+  beta_start: 1.0e-4
+  beta_end: 2.0e-2
+  beta_schedule: cosine
+  prediction_target: epsilon

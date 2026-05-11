@@ -216,6 +216,42 @@ class _DPFontCollate:
 # ---------------------------------------------------------------------------
 
 
+class _DPFontTTFAdapter(Dataset):
+    """Wrap TTFCrossFontPairDataset and inject synthesised stroke_order,
+    ink_intensity, font_size — DP-Font's collate requires these keys.
+
+    Real values come from the Ernantang manifest in Stage B/C. For the TTF
+    pretrain stage we use the same deterministic hash-based synthesis the
+    SyntheticDataset uses, so each (char, font) pair gets a stable label.
+    """
+
+    def __init__(self, *, inner, stroke_vocab_size: int, stroke_seq_len: int) -> None:
+        super().__init__()
+        self.inner = inner
+        self.stroke_vocab_size = int(stroke_vocab_size)
+        self.stroke_seq_len = int(stroke_seq_len)
+
+    def __len__(self) -> int:
+        return len(self.inner)
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        s = self.inner[idx]
+        meta = s.get("metadata", {})
+        char = meta.get("char", "")
+        target_font = meta.get("target_font", "")
+        seed_text = f"{char}::{target_font}::{idx}"
+        stroke_ids = synthesise_stroke_order(
+            seed_text=seed_text,
+            vocab_size=self.stroke_vocab_size,
+            seq_len=self.stroke_seq_len,
+        )
+        s = dict(s)  # shallow copy
+        s["stroke_order"] = stroke_ids
+        s["ink_intensity"] = float(synthesise_scalar_attribute(seed_text=seed_text, salt="ink"))
+        s["font_size"] = float(synthesise_scalar_attribute(seed_text=seed_text, salt="size"))
+        return s
+
+
 def build_dataset(
     *,
     args: argparse.Namespace,
@@ -238,6 +274,46 @@ def build_dataset(
 
     use_synthetic = bool(getattr(args, "synthetic", False))
     source = str(data_cfg.get("source", "manifest")).lower()
+    if source == "ttf" and not use_synthetic:
+        from pathlib import Path as _P
+        from paper_reimpl_shared.data.ttf_pair_dataset import TTFCrossFontPairDataset
+
+        fonts_root_cfg = data_cfg.get("fonts_root")
+        if fonts_root_cfg:
+            fonts_root = _P(str(fonts_root_cfg))
+        else:
+            fonts_root = paths.ttf_root.parent / "fonts_free"
+        cache_cfg = data_cfg.get("supported_chars_cache")
+        ratio = float(data_cfg.get("font_size_ratio", 0.85))
+        cache_path = _P(str(cache_cfg)) if cache_cfg else (
+            fonts_root / f".ttf_supported_chars_{image_size}px_{ratio}.json"
+        )
+        inner = TTFCrossFontPairDataset(
+            fonts_root=fonts_root,
+            font_ids=data_cfg.get("font_ids"),
+            image_size=image_size,
+            content_channels=content_channels,
+            font_size_ratio=ratio,
+            length=int(data_cfg.get("ttf_epoch_length", 10000)),
+            ref_count=max_refs,
+            seed=int(data_cfg.get("seed", 42)),
+            ensure_diff_source=bool(data_cfg.get("ensure_diff_source", True)),
+            cjk_start=int(data_cfg.get("cjk_start", 0x4E00)),
+            cjk_end=int(data_cfg.get("cjk_end", 0x9FFF)),
+            char_cache_path=cache_path,
+            script_categories=data_cfg.get("script_categories"),
+        )
+        # DP-Font's collate requires stroke_order / ink_intensity /
+        # font_size on every item. Real Ernantang annotation for these is
+        # a Stage B/C deliverable; for the TTF Stage A pretrain we
+        # synthesise them deterministically from char+font (same helper
+        # used by DPFontSyntheticDataset).
+        return _DPFontTTFAdapter(
+            inner=inner,
+            stroke_vocab_size=stroke_vocab_size,
+            stroke_seq_len=stroke_seq_len,
+        )
+
     if use_synthetic or source == "synthetic":
         return DPFontSyntheticDataset(
             length=int(data_cfg.get("synthetic_length", 32)),

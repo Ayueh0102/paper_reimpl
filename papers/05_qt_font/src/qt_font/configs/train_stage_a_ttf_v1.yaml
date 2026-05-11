@@ -1,0 +1,17 @@
+# 05 Stage A v1 — TTF cross-font pretrain (5000 step).
+seed: 42
+batch_size: 4
+num_workers: 0
+learning_rate: 1.0e-4
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 100
+max_steps: 5000
+log_every: 100
+ckpt_dir: papers/05_qt_font/outputs/stage_a_ttf_v1
+
+diffusion:
+  timesteps: 1000
+  schedule: cos
+  beta_start: 0.02
+  beta_end: 1.0

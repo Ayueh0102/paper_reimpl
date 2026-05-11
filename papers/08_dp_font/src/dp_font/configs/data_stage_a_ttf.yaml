@@ -1,0 +1,24 @@
+# 08 Stage A — TTF cross-font pretrain via shared TTFCrossFontPairDataset.
+# stroke_order / ink_intensity / font_size are deterministically synthesised
+# from char+font seed (real values come from manifest in Stage B/C).
+source: ttf
+font_size_ratio: 0.85
+ttf_epoch_length: 20000
+max_refs: 0
+cjk_start: 0x4E00
+cjk_end: 0x9FFF
+content_channels: [bitmap]
+script_categories:
+  lxgw_wenkai_regular: kai
+  lxgw_wenkai_light: kai
+  lxgw_wenkai_medium: kai
+  ma_shan_zheng: xing
+  long_cang: cao
+  liu_jian_mao_cao: cao
+  zcool_xiaowei: ming
+  zcool_kuaile: decor
+  zcool_qingke_huangyou: hei
+  noto_sans_sc: hei
+  noto_sans_tc: hei
+  noto_serif_sc: ming
+  noto_serif_tc: ming

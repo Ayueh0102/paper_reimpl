@@ -250,6 +250,28 @@ class VQFontCollate:
         return vq_font_collate(batch, max_refs=self.max_refs)
 
 
+class _VQFontTTFAdapter(Dataset):
+    """Wrap TTFCrossFontPairDataset and add ``structure_id`` per sample
+    via the same IDS-lookup helper used by VQFontDataset (real Stage A/B/C
+    manifest path). Falls back to class 1 (atomic) when IDS unavailable.
+    """
+
+    def __init__(self, *, inner) -> None:
+        super().__init__()
+        self.inner = inner
+
+    def __len__(self) -> int:
+        return len(self.inner)
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        s = self.inner[idx]
+        meta = s.get("metadata", {})
+        sid = _structure_id_from_row({"char": meta.get("char")})
+        s = dict(s)
+        s["structure_id"] = int(sid)
+        return s
+
+
 def build_dataset(
     *,
     args: argparse.Namespace,
@@ -272,6 +294,40 @@ def build_dataset(
     max_refs = int(data_cfg.get("max_refs", 3))
     use_synthetic = bool(getattr(args, "synthetic", False))
     source = str(data_cfg.get("source", "manifest")).lower()
+    if source == "ttf" and not use_synthetic:
+        from pathlib import Path as _P
+        from paper_reimpl_shared.data.ttf_pair_dataset import TTFCrossFontPairDataset
+
+        fonts_root_cfg = data_cfg.get("fonts_root")
+        if fonts_root_cfg:
+            fonts_root = _P(str(fonts_root_cfg))
+        else:
+            fonts_root = paths.ttf_root.parent / "fonts_free"
+        cache_cfg = data_cfg.get("supported_chars_cache")
+        ratio = float(data_cfg.get("font_size_ratio", 0.85))
+        cache_path = _P(str(cache_cfg)) if cache_cfg else (
+            fonts_root / f".ttf_supported_chars_{image_size}px_{ratio}.json"
+        )
+        inner = TTFCrossFontPairDataset(
+            fonts_root=fonts_root,
+            font_ids=data_cfg.get("font_ids"),
+            image_size=image_size,
+            content_channels=int(data_cfg.get("content_channels_n", 1)),
+            font_size_ratio=ratio,
+            length=int(data_cfg.get("ttf_epoch_length", 10000)),
+            ref_count=max_refs,
+            seed=int(data_cfg.get("seed", 42)),
+            ensure_diff_source=bool(data_cfg.get("ensure_diff_source", True)),
+            cjk_start=int(data_cfg.get("cjk_start", 0x4E00)),
+            cjk_end=int(data_cfg.get("cjk_end", 0x9FFF)),
+            char_cache_path=cache_path,
+            script_categories=data_cfg.get("script_categories"),
+        )
+        # Wrap to inject structure_id derived from the IDS lookup on the
+        # target char (paper-faithful — VQ-Font's SSEM expects a real
+        # structure class per sample).
+        return _VQFontTTFAdapter(inner=inner)
+
     if use_synthetic or source == "synthetic":
         return VQFontSyntheticDataset(
             length=int(data_cfg.get("synthetic_length", 16)),

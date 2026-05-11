@@ -63,6 +63,21 @@ def build_dataset(
 
     use_synthetic = bool(getattr(args, "synthetic", False))
     source = str(data_cfg.get("source", "manifest")).lower()
+    if source == "ttf" and not use_synthetic:
+        # NOTE — Moyun operates in **VAE latent space** (model expects
+        # 4-ch 32×32 latents, not 1-ch 128×128 glyph pixels). Direct
+        # TTFCrossFontPairDataset glyphs will NOT pass through the model
+        # without a VAE encoder. Same paper-faithful gap as 02_hfh_font:
+        # need a separate VAE pretrain stage that turns TTF glyphs into
+        # latents, then this branch can warm-start from that VAE ckpt.
+        # Tracked as a Stage A v2 follow-up; see 02's pretrain_vae.py for
+        # the pattern.
+        raise NotImplementedError(
+            "07_moyun source=ttf is a latent-diffusion paper — needs a "
+            "VAE pretrain stage first (see 02_hfh_font/scripts/pretrain_vae.py). "
+            "Use source=synthetic for plumbing-only shakedowns."
+        )
+
     if use_synthetic or source == "synthetic":
         return SyntheticCalligraphyDataset(
             length=int(data_cfg.get("synthetic_length", 16)),

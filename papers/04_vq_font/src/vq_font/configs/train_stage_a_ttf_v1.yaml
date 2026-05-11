@@ -1,0 +1,13 @@
+# 04 Stage A v1 — VQGAN warm-up via TTF cross-font pretrain (5000 step).
+# simple_loss=true uses L1+commitment only (no LPIPS download dependency).
+seed: 42
+batch_size: 16
+num_workers: 0
+learning_rate: 1.0e-4
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 100
+max_steps: 5000
+log_every: 100
+simple_loss: true
+ckpt_dir: papers/04_vq_font/outputs/stage_a_ttf_v1
