@@ -19,6 +19,7 @@ freeze the VQ encoder/decoder) → AR training on (IDS, refs) → target tokens.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import random
 from pathlib import Path
@@ -152,6 +153,40 @@ def _model_cfg_from_yaml(model_cfg: dict[str, Any]) -> IFFontConfig:
     )
 
 
+def _warm_fit_tokenizer(
+    tokenizer: IDSTokenizer,
+    dataset,
+    *,
+    max_samples: int | None = None,
+) -> None:
+    """Pre-scan the dataset to populate the tokenizer vocab, then freeze.
+
+    This avoids the data-race where ``IFFontCollate._maybe_fit`` mutates the
+    tokenizer inside a DataLoader worker subprocess — the mutation would
+    never reach the main process. Pre-fitting + freezing is the correct
+    pattern for ``num_workers > 0`` runs.
+
+    The warm pass uses each row's ``ids_string`` field (added either by
+    ``IFFontDataset._fetch`` or ``_SyntheticIFFontDataset.__getitem__``).
+    Falls back to a per-index dataset iteration; we keep this simple and
+    sequential since it runs once at startup.
+    """
+    n = len(dataset)
+    if max_samples is not None:
+        n = min(n, int(max_samples))
+    ids_strings: list[str] = []
+    for i in range(n):
+        try:
+            row = dataset[i]
+        except Exception:  # pragma: no cover — degraded mode for sparse datasets
+            continue
+        s = row.get("ids_string", "") if isinstance(row, dict) else ""
+        if s:
+            ids_strings.append(s)
+    tokenizer.fit_from_strings(ids_strings)
+    tokenizer.freeze()
+
+
 def _build_dataloader(
     *,
     args,
@@ -173,10 +208,23 @@ def _build_dataloader(
     nw = int(train_cfg.get("num_workers", 0))
     if getattr(args, "dry_run", False):
         nw = 0
+
+    # Warm-fit the tokenizer BEFORE the DataLoader is constructed so that
+    # `num_workers > 0` is safe (worker-side vocab growth would not reach
+    # the main process). If the tokenizer is already frozen by the caller,
+    # _warm_fit_tokenizer is a no-op.
+    if not tokenizer.is_frozen:
+        _warm_fit_tokenizer(
+            tokenizer,
+            dataset,
+            max_samples=int(train_cfg.get("tokenizer_warm_fit_max_samples", 0)) or None,
+        )
+
     collate = IFFontCollate(
         tokenizer=tokenizer,
         max_refs=int(data_cfg.get("max_refs", 1)),
         ids_max_len=int(model_cfg.ids_max_len),
+        fit_on_first_call=False,
     )
     return DataLoader(
         dataset,
@@ -205,13 +253,17 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
 
     cfg = _model_cfg_from_yaml(model_cfg)
 
-    # Build tokenizer. By default we use the IDC-only vocab and let the
-    # collate's first call grow it from observed strings. Paper specifies
-    # IDS but not the dict source — we use CHISE-derived CNS table.
+    # Build tokenizer with the IDC-only vocab. The DataLoader builder runs
+    # a warm fit pass over the dataset's IDS strings BEFORE constructing
+    # the DataLoader and then freezes the tokenizer, which keeps multi-
+    # worker training safe (worker-side mutation would not reach the main
+    # process). Paper specifies IDS but not the dict source — we use the
+    # CHISE-derived CNS table via ids_lookup_path.
     tokenizer = IDSTokenizer.from_idc_only()
-    # Sync the model vocab size with the tokenizer so the IDS embedding
-    # table has enough rows. We size up cfg.ids_vocab_size if needed.
-    cfg.ids_vocab_size = max(cfg.ids_vocab_size, tokenizer.vocab_size + 4096)
+    # Pad the model vocab so the IDS embedding table can fit the warm-fit
+    # vocab size with headroom for occasional manifest churn.
+    _IDS_VOCAB_HEADROOM = 4096  # upper bound on unique CJK leaf components
+    cfg.ids_vocab_size = max(cfg.ids_vocab_size, tokenizer.vocab_size + _IDS_VOCAB_HEADROOM)
 
     model = build_if_font(cfg).to(device)
 
@@ -223,6 +275,13 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
         paths=paths,
         tokenizer=tokenizer,
     )
+    # Sanity check: after warm-fit, the tokenizer must still fit the
+    # model's embedding table.
+    if tokenizer.vocab_size > cfg.ids_vocab_size:
+        raise ValueError(
+            f"IDS tokenizer vocab ({tokenizer.vocab_size}) exceeds model "
+            f"ids_vocab_size ({cfg.ids_vocab_size}); increase vocab headroom."
+        )
 
     lr = float(train_cfg.get("learning_rate", 2.0e-4))
     optim = torch.optim.AdamW(
@@ -236,6 +295,15 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
     ce_weight = float(train_cfg.get("ce_weight", 1.0))
     vq_weight = float(train_cfg.get("vq_weight", 1.0))
     recon_weight = float(train_cfg.get("recon_weight", 1.0))
+
+    # Freeze the VQ codebook outside Stage A. In Stage B/C the AR target is
+    # the codebook indices; if the codebook EMA keeps updating, the CE target
+    # drifts under the AR objective. Defaults: freeze when both vq_weight and
+    # recon_weight are zero (the canonical Stage B/C config); explicit
+    # `freeze_codebook` in train YAML overrides.
+    default_freeze = (vq_weight == 0.0 and recon_weight == 0.0)
+    freeze_codebook = bool(train_cfg.get("freeze_codebook", default_freeze))
+    model.vq.quantizer.update_codebook = not freeze_codebook
     max_steps = int(train_cfg.get("max_steps", 1 if args.dry_run else 1_000_000))
     log_every = int(train_cfg.get("log_every", 50))
 
@@ -247,7 +315,8 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
     print(
         f"[if_font] device={device} steps={max_steps} bs={train_cfg.get('batch_size')} "
         f"lr={lr} ce={ce_weight} vq={vq_weight} recon={recon_weight} cfg_drop={cfg_drop} "
-        f"codebook={cfg.vq.codebook_size} d_model={cfg.d_model} blocks={cfg.n_blocks}"
+        f"codebook={cfg.vq.codebook_size} d_model={cfg.d_model} blocks={cfg.n_blocks} "
+        f"freeze_codebook={freeze_codebook}"
     )
 
     model.train()
@@ -282,7 +351,10 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
 
     if ckpt_dir is not None and not args.dry_run:
         path = Path(ckpt_dir) / "if_font_last.pt"
-        torch.save({"model": model.state_dict(), "cfg": cfg.__dict__}, path)
+        # Use dataclasses.asdict to deep-convert the nested VQTokenizerConfig
+        # into a plain dict — cfg.__dict__ would leave the nested dataclass
+        # as a live object, which is brittle across class-definition changes.
+        torch.save({"model": model.state_dict(), "cfg": dataclasses.asdict(cfg)}, path)
         print(f"[if_font] saved checkpoint -> {path}")
 
     print(f"[if_font] done; final_step={step} dry_run={args.dry_run}")

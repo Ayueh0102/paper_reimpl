@@ -86,10 +86,17 @@ class IDSTokenizer:
       0..3   special tokens (PAD/BOS/EOS/UNK)
       4..15  12 IDC chars (from ``DEFAULT_IDC_CHARS``)
       16..   leaf components (CJK chars discovered during fit)
+
+    The tokenizer can be marked ``is_frozen=True`` after a warm fit pass; in
+    that mode ``add_token`` / ``fit_from_strings`` are no-ops and unknown
+    characters fall back to UNK at encode time. This is the safe mode for
+    multi-worker DataLoaders, where collate-side vocab growth in a worker
+    subprocess never propagates back to the main process.
     """
 
     vocab: list[str] = field(default_factory=list)
     token_to_id: dict[str, int] = field(default_factory=dict)
+    is_frozen: bool = False
 
     @property
     def pad_id(self) -> int:
@@ -128,23 +135,37 @@ class IDSTokenizer:
     def add_token(self, token: str) -> int:
         if token in self.token_to_id:
             return self.token_to_id[token]
+        if self.is_frozen:
+            # Frozen tokenizer: refuse to grow. Caller is responsible for
+            # falling back to UNK at encode time.
+            return self.unk_id
         idx = len(self.vocab)
         self.vocab.append(token)
         self.token_to_id[token] = idx
         return idx
 
     def fit_from_strings(self, ids_strings: Iterable[str]) -> IDSTokenizer:
-        """Add every char in ``ids_strings`` as its own token.
+        """Add every char in ``ids_strings`` as its own token (mutates in place).
+
+        Returns ``self`` for fluent chaining only — the caller already owns
+        the mutated instance. No-op when ``is_frozen=True``.
 
         IDS is character-level: each Unicode code point is one token (this is
         the same convention as char-rnn over CJK + IDC). The 12 IDC chars are
         already pre-registered so they collide with no leaf component.
         """
+        if self.is_frozen:
+            return self
         for s in ids_strings:
             if not s:
                 continue
             for ch in s:
                 self.add_token(ch)
+        return self
+
+    def freeze(self) -> IDSTokenizer:
+        """Mark the tokenizer as immutable. Returns ``self`` for chaining."""
+        self.is_frozen = True
         return self
 
     @classmethod

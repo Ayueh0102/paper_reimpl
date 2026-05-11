@@ -16,6 +16,7 @@ external DB; see ``reports/blind_impl.md`` decision #4.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 from typing import Any
 
@@ -63,9 +64,19 @@ def synthesise_stroke_order(
     a real stroke-order DB (cjklib / Make-Me-a-Hanzi / 國家教育研究院筆順
     DB). The model interface is identical so swapping is mechanical.
     """
+    if min_len < 0:
+        raise ValueError(f"min_len must be non-negative, got {min_len}")
+    if seq_len <= 0:
+        raise ValueError(f"seq_len must be positive, got {seq_len}")
+    if min_len > seq_len:
+        raise ValueError(
+            f"min_len={min_len} > seq_len={seq_len}: cannot fit synthesised "
+            "sequence into the padded slot. Caller must either raise seq_len "
+            "or clamp min_len."
+        )
     digest = hashlib.sha256(seed_text.encode("utf-8")).digest()
     # First byte → length in [min_len, seq_len]
-    length = min_len + int(digest[0]) % max(1, (seq_len - min_len + 1))
+    length = min_len + int(digest[0]) % (seq_len - min_len + 1)
     out = [-1] * seq_len
     for i in range(length):
         out[i] = int(digest[(i + 1) % len(digest)]) % max(1, vocab_size)
@@ -207,9 +218,9 @@ class _DPFontCollate:
 
 def build_dataset(
     *,
-    args,
+    args: argparse.Namespace,
     data_cfg: dict[str, Any],
-    model_cfg,
+    model_cfg: Any,
     paths: BackendPaths,
 ) -> Dataset:
     """Choose between synthetic and manifest-backed datasets.

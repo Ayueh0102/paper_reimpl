@@ -22,13 +22,38 @@ def make_synthetic_batch(
     writer_vocab_size: int = 24,
     n_refs: int = 4,
     device: str = "cpu",
+    seed: int | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Standard synthetic batch dictionary used by all papers' smoke tests."""
+    """Standard synthetic batch dictionary used by all papers' smoke tests.
+
+    Parameters
+    ----------
+    seed : int | None, optional
+        If provided, a CPU ``torch.Generator`` is seeded with this value and
+        used for every random tensor. Tensors are then moved to ``device``.
+        This makes the synthetic stream reproducible across runs and is
+        backwards compatible (default ``None`` matches the previous global-RNG
+        behaviour).
+    """
+    if seed is None:
+        return {
+            "image": torch.randn(batch_size, in_channels, image_size, image_size, device=device),
+            "content": torch.randn(batch_size, 3, image_size, image_size, device=device),
+            "refs": torch.randn(batch_size, n_refs, in_channels, image_size, image_size, device=device),
+            "char_id": torch.randint(0, char_vocab_size, (batch_size,), device=device),
+            "writer_id": torch.randint(0, writer_vocab_size, (batch_size,), device=device),
+            "script_id": torch.randint(0, 5, (batch_size,), device=device),
+        }
+    # Use a CPU generator (works on every backend) and migrate to device afterwards.
+    g = torch.Generator(device="cpu")
+    g.manual_seed(int(seed))
     return {
-        "image": torch.randn(batch_size, in_channels, image_size, image_size, device=device),
-        "content": torch.randn(batch_size, 3, image_size, image_size, device=device),
-        "refs": torch.randn(batch_size, n_refs, in_channels, image_size, image_size, device=device),
-        "char_id": torch.randint(0, char_vocab_size, (batch_size,), device=device),
-        "writer_id": torch.randint(0, writer_vocab_size, (batch_size,), device=device),
-        "script_id": torch.randint(0, 5, (batch_size,), device=device),  # 楷/行/草/隸/篆
+        "image": torch.randn(batch_size, in_channels, image_size, image_size, generator=g).to(device),
+        "content": torch.randn(batch_size, 3, image_size, image_size, generator=g).to(device),
+        "refs": torch.randn(
+            batch_size, n_refs, in_channels, image_size, image_size, generator=g
+        ).to(device),
+        "char_id": torch.randint(0, char_vocab_size, (batch_size,), generator=g).to(device),
+        "writer_id": torch.randint(0, writer_vocab_size, (batch_size,), generator=g).to(device),
+        "script_id": torch.randint(0, 5, (batch_size,), generator=g).to(device),
     }

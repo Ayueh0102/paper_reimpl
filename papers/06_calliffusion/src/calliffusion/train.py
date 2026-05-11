@@ -20,6 +20,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from paper_reimpl_shared.diffusion.gaussian import GaussianDiffusion
 from torch.utils.data import DataLoader, Dataset
@@ -30,7 +31,7 @@ from .dataset import (
     collate_prompt_batch,
 )
 from .lora import apply_lora_to_module, freeze_non_lora, lora_parameters
-from .model import build_unet_from_yaml
+from .model import SpatialCrossAttention, build_unet_from_yaml
 from .text import build_text_encoder
 
 # ---------------------------------------------------------------------------
@@ -75,10 +76,11 @@ def build_dataset(
         content_channels=list(data_cfg.get("content_channels", [])),
         max_refs=int(data_cfg.get("max_refs", 0)),
         prompt_dropout_p=float(data_cfg.get("prompt_dropout_p", 0.1)),
+        seed=int(data_cfg.get("seed", 0)),
     )
 
 
-def build_text_encoder_from_cfg(model_cfg: dict[str, Any]):
+def build_text_encoder_from_cfg(model_cfg: dict[str, Any]) -> nn.Module:
     section = model_cfg.get("text_encoder", {})
     return build_text_encoder(
         use_bert=bool(section.get("use_bert", False)),
@@ -93,9 +95,14 @@ def maybe_apply_lora(model: torch.nn.Module, train_cfg: dict[str, Any]) -> int:
     lora_cfg = train_cfg.get("lora", {})
     if not lora_cfg.get("enabled", False):
         return 0
+    # Scope LoRA to cross-attention only. Without this, the ``to_out``
+    # substring would also match ``SpatialSelfAttention.to_out`` and
+    # silently inflate the trainable parameter count beyond the
+    # paper-stated "cross-attention projections only" target.
     wrapped = apply_lora_to_module(
         model,
         target_substrings=tuple(lora_cfg.get("target_substrings", ["to_q", "to_k", "to_v", "to_out"])),
+        parent_types=(SpatialCrossAttention,),
         rank=int(lora_cfg.get("rank", 4)),
         alpha=float(lora_cfg.get("alpha", 8.0)),
         dropout=float(lora_cfg.get("dropout", 0.0)),
@@ -105,7 +112,7 @@ def maybe_apply_lora(model: torch.nn.Module, train_cfg: dict[str, Any]) -> int:
     return wrapped
 
 
-def freeze_text_encoder(text_encoder, train_cfg: dict[str, Any]) -> None:
+def freeze_text_encoder(text_encoder: nn.Module, train_cfg: dict[str, Any]) -> None:
     section = train_cfg.get("text_encoder", {})
     if not section.get("freeze", True):
         return
@@ -208,7 +215,14 @@ def main(
     log_every = max(1, int(train_cfg.get("log_every", 10)))
 
     unet.train()
-    text_encoder.train()
+    # Only put the text encoder in train() mode when it has at least one
+    # trainable parameter. Stage A/C freeze BERT entirely; leaving it in
+    # train() would activate the BERT internal Dropout layers and inject
+    # noise into what should be a deterministic feature extractor.
+    if any(p.requires_grad for p in text_encoder.parameters()):
+        text_encoder.train()
+    else:
+        text_encoder.eval()
 
     step = 0
     last_loss: float = float("nan")

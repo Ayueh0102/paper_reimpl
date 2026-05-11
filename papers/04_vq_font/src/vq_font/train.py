@@ -25,8 +25,12 @@ Two stages are dispatched by ``train_cfg.stage``:
 
 from __future__ import annotations
 
+import argparse
+import json
+import logging
 import os
 import random
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +58,9 @@ __all__ = [
     "transformer_compute_loss",
     "main",
 ]
+
+
+logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------------------
@@ -207,9 +214,9 @@ def _move_batch(batch: dict[str, Any], device: torch.device) -> dict[str, torch.
 
 def _build_dataloader(
     *,
-    args,
+    args: argparse.Namespace,
     data_cfg: dict[str, Any],
-    model_cfg,
+    model_cfg: VQFontConfig | VQGANConfig,
     train_cfg: dict[str, Any],
     paths: BackendPaths,
 ) -> DataLoader:
@@ -230,18 +237,63 @@ def _build_dataloader(
     )
 
 
+def _save_state_with_cfg(
+    *,
+    state: dict[str, Any],
+    cfg_dict: dict[str, Any],
+    ckpt_path: Path,
+) -> None:
+    """Persist a state-dict + JSON sidecar config side-by-side.
+
+    Splitting the config out as JSON lets the matching loader call
+    ``torch.load(..., weights_only=True)`` — i.e. no arbitrary pickle
+    deserialization on the trust boundary.
+    """
+    torch.save(state, ckpt_path)
+    cfg_path = ckpt_path.with_suffix(ckpt_path.suffix + ".cfg.json")
+    cfg_path.write_text(json.dumps(cfg_dict, sort_keys=True, indent=2))
+
+
 def _load_vqgan_ckpt(
     model: VQFont | VQGAN, ckpt_path: str | Path, *, strict: bool = True
 ) -> None:
-    blob = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    """Load a VQGAN state-dict checkpoint with ``weights_only=True``.
+
+    Accepts both new-style checkpoints (raw state-dict) and the legacy
+    ``{"model": state, "cfg": ...}`` blob format saved by earlier runs.
+    For legacy files we fall back to ``weights_only=False`` only after
+    confirming the file is a dict whose values are tensors — i.e. no
+    arbitrary classes — and we log a deprecation warning.
+    """
+    try:
+        blob = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    except Exception:  # noqa: BLE001 — torch raises a UnpicklingError subclass.
+        logger.warning(
+            "[vq_font] checkpoint %s is legacy (weights_only=False fallback). "
+            "Re-save via training to get the safe split-config format.",
+            ckpt_path,
+        )
+        blob = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     state = blob["model"] if isinstance(blob, dict) and "model" in blob else blob
+    if not isinstance(state, dict):
+        raise TypeError(
+            f"VQGAN checkpoint at {ckpt_path} did not yield a state-dict "
+            f"(got {type(state).__name__})."
+        )
     if isinstance(model, VQFont):
         model.vqgan.load_state_dict(state, strict=strict)
     else:
         model.load_state_dict(state, strict=strict)
 
 
-def _run_vqgan_stage(args, *, data_cfg, model_cfg, train_cfg, paths) -> int:
+def _run_vqgan_stage(
+    args: argparse.Namespace,
+    *,
+    data_cfg: dict[str, Any],
+    model_cfg: dict[str, Any],
+    train_cfg: dict[str, Any],
+    paths: BackendPaths,
+) -> int:
     device = torch.device(args.device)
     _seed_everything(int(train_cfg.get("seed", 42)))
     vqgan_cfg = _vqgan_cfg_from_yaml(model_cfg)
@@ -265,10 +317,10 @@ def _run_vqgan_stage(args, *, data_cfg, model_cfg, train_cfg, paths) -> int:
         ckpt_dir = resolve_path(ckpt_dir, base=Path(__file__).resolve().parents[3])
         os.makedirs(ckpt_dir, exist_ok=True)
 
-    print(
-        f"[vq_font/vqgan] device={device} bs={train_cfg.get('batch_size')} lr={lr} "
-        f"steps={max_steps} K={vqgan_cfg.num_embeddings} z_grid={vqgan_cfg.out_resolution()} "
-        f"recon_w={recon_w} vq_w={vq_w}"
+    logger.info(
+        "[vq_font/vqgan] device=%s bs=%s lr=%s steps=%d K=%d z_grid=%d recon_w=%s vq_w=%s",
+        device, train_cfg.get("batch_size"), lr, max_steps,
+        vqgan_cfg.num_embeddings, vqgan_cfg.out_resolution(), recon_w, vq_w,
     )
 
     model.train()
@@ -285,9 +337,9 @@ def _run_vqgan_stage(args, *, data_cfg, model_cfg, train_cfg, paths) -> int:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optim.step()
             if step % log_every == 0:
-                print(
-                    f"[vq_font/vqgan] step={step} loss={log['loss_total']:.4f} "
-                    f"recon={log['loss_recon']:.4f} vq={log['loss_vq']:.4f}"
+                logger.info(
+                    "[vq_font/vqgan] step=%d loss=%.4f recon=%.4f vq=%.4f",
+                    step, log["loss_total"], log["loss_recon"], log["loss_vq"],
                 )
             step += 1
             if step >= max_steps or args.dry_run:
@@ -297,37 +349,91 @@ def _run_vqgan_stage(args, *, data_cfg, model_cfg, train_cfg, paths) -> int:
 
     if ckpt_dir is not None and not args.dry_run:
         path = Path(ckpt_dir) / "vqgan_last.pt"
-        torch.save({"model": model.state_dict(), "cfg": vqgan_cfg.__dict__}, path)
-        print(f"[vq_font/vqgan] saved checkpoint -> {path}")
-    print(f"[vq_font/vqgan] done; final_step={step} dry_run={args.dry_run}")
+        _save_state_with_cfg(
+            state=model.state_dict(),
+            cfg_dict=asdict(vqgan_cfg),
+            ckpt_path=path,
+        )
+        logger.info("[vq_font/vqgan] saved checkpoint -> %s", path)
+    logger.info("[vq_font/vqgan] done; final_step=%d dry_run=%s", step, args.dry_run)
     return 0
 
 
-def _run_transformer_stage(args, *, data_cfg, model_cfg, train_cfg, paths) -> int:
+def _build_optimizer(
+    model: VQFont,
+    *,
+    lr: float,
+    weight_decay: float,
+) -> torch.optim.Optimizer:
+    """AdamW over the trainable subset (VQGAN frozen at Stage 1+)."""
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    return torch.optim.AdamW(
+        trainable, lr=lr, betas=(0.9, 0.999), weight_decay=weight_decay,
+    )
+
+
+def _save_transformer_ckpt(
+    *,
+    model: VQFont,
+    vqgan_cfg: VQGANConfig,
+    tr_cfg: TransformerConfig,
+    ckpt_dir: Path,
+) -> Path:
+    """Save transformer + frozen VQGAN weights with JSON sidecar configs."""
+    path = ckpt_dir / "transformer_last.pt"
+    state = {
+        "transformer": model.transformer.state_dict(),
+        "vqgan": model.vqgan.state_dict(),
+    }
+    cfg_dict = {
+        "vqgan": asdict(vqgan_cfg),
+        "transformer": asdict(tr_cfg),
+    }
+    _save_state_with_cfg(state=state, cfg_dict=cfg_dict, ckpt_path=path)
+    return path
+
+
+def _try_load_vqgan_warmstart(
+    model: VQFont, *, train_cfg: dict[str, Any]
+) -> None:
+    """Best-effort load of a Stage-0 VQGAN checkpoint for warm-start."""
+    vqgan_ckpt = train_cfg.get("vqgan_ckpt")
+    if not vqgan_ckpt:
+        return
+    ckpt_path = resolve_path(vqgan_ckpt, base=Path(__file__).resolve().parents[3])
+    if ckpt_path.exists():
+        _load_vqgan_ckpt(model, ckpt_path, strict=False)
+        logger.info("[vq_font/transformer] loaded VQGAN ckpt: %s", ckpt_path)
+    else:
+        logger.warning(
+            "[vq_font/transformer] VQGAN ckpt not found at %s — using random init",
+            ckpt_path,
+        )
+
+
+def _run_transformer_stage(
+    args: argparse.Namespace,
+    *,
+    data_cfg: dict[str, Any],
+    model_cfg: dict[str, Any],
+    train_cfg: dict[str, Any],
+    paths: BackendPaths,
+) -> int:
     device = torch.device(args.device)
     _seed_everything(int(train_cfg.get("seed", 42)))
     vqgan_cfg = _vqgan_cfg_from_yaml(model_cfg)
     tr_cfg = _transformer_cfg_from_yaml(model_cfg, vqgan_cfg)
     cfg = VQFontConfig(vqgan=vqgan_cfg, transformer=tr_cfg)
     model = build_vq_font(cfg, freeze_vqgan=True).to(device)
-
-    vqgan_ckpt = train_cfg.get("vqgan_ckpt")
-    if vqgan_ckpt:
-        ckpt_path = resolve_path(vqgan_ckpt, base=Path(__file__).resolve().parents[3])
-        if ckpt_path.exists():
-            _load_vqgan_ckpt(model, ckpt_path, strict=False)
-            print(f"[vq_font/transformer] loaded VQGAN ckpt: {ckpt_path}")
-        else:
-            print(f"[vq_font/transformer] WARN: VQGAN ckpt not found at {ckpt_path} — using random init")
+    _try_load_vqgan_warmstart(model, train_cfg=train_cfg)
 
     loader = _build_dataloader(
         args=args, data_cfg=data_cfg, model_cfg=cfg, train_cfg=train_cfg, paths=paths
     )
     lr = float(train_cfg.get("learning_rate", 2.0e-4))
-    # Only optimize the Transformer (vqgan frozen).
-    optim = torch.optim.AdamW(
-        [p for p in model.parameters() if p.requires_grad],
-        lr=lr, betas=(0.9, 0.999),
+    optim = _build_optimizer(
+        model,
+        lr=lr,
         weight_decay=float(train_cfg.get("weight_decay", 0.0)),
     )
     grad_clip = float(train_cfg.get("grad_clip", 0.0))
@@ -339,10 +445,10 @@ def _run_transformer_stage(args, *, data_cfg, model_cfg, train_cfg, paths) -> in
         ckpt_dir = resolve_path(ckpt_dir, base=Path(__file__).resolve().parents[3])
         os.makedirs(ckpt_dir, exist_ok=True)
 
-    print(
-        f"[vq_font/transformer] device={device} bs={train_cfg.get('batch_size')} lr={lr} "
-        f"steps={max_steps} K={vqgan_cfg.num_embeddings} latent={tr_cfg.latent_resolution} "
-        f"refs={tr_cfg.num_refs} structure_w={structure_w}"
+    logger.info(
+        "[vq_font/transformer] device=%s bs=%s lr=%s steps=%d K=%d latent=%d refs=%d struct_w=%s",
+        device, train_cfg.get("batch_size"), lr, max_steps,
+        vqgan_cfg.num_embeddings, tr_cfg.latent_resolution, tr_cfg.num_refs, structure_w,
     )
 
     # VQGAN stays in eval mode (frozen BN/dropout).
@@ -363,10 +469,11 @@ def _run_transformer_stage(args, *, data_cfg, model_cfg, train_cfg, paths) -> in
                 )
             optim.step()
             if step % log_every == 0:
-                print(
-                    f"[vq_font/transformer] step={step} loss={log['loss_total']:.4f} "
-                    f"token_ce={log['loss_token']:.4f} struct_ce={log['loss_struct']:.4f} "
-                    f"top1={log['token_acc']*100:.2f}%"
+                logger.info(
+                    "[vq_font/transformer] step=%d loss=%.4f token_ce=%.4f "
+                    "struct_ce=%.4f top1=%.2f%%",
+                    step, log["loss_total"], log["loss_token"],
+                    log["loss_struct"], log["token_acc"] * 100,
                 )
             step += 1
             if step >= max_steps or args.dry_run:
@@ -375,22 +482,24 @@ def _run_transformer_stage(args, *, data_cfg, model_cfg, train_cfg, paths) -> in
             break
 
     if ckpt_dir is not None and not args.dry_run:
-        path = Path(ckpt_dir) / "transformer_last.pt"
-        torch.save(
-            {
-                "transformer": model.transformer.state_dict(),
-                "vqgan": model.vqgan.state_dict(),
-                "vqgan_cfg": vqgan_cfg.__dict__,
-                "transformer_cfg": tr_cfg.__dict__,
-            },
-            path,
+        path = _save_transformer_ckpt(
+            model=model, vqgan_cfg=vqgan_cfg, tr_cfg=tr_cfg, ckpt_dir=Path(ckpt_dir),
         )
-        print(f"[vq_font/transformer] saved checkpoint -> {path}")
-    print(f"[vq_font/transformer] done; final_step={step} dry_run={args.dry_run}")
+        logger.info("[vq_font/transformer] saved checkpoint -> %s", path)
+    logger.info(
+        "[vq_font/transformer] done; final_step=%d dry_run=%s", step, args.dry_run,
+    )
     return 0
 
 
-def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
+def main(
+    args: argparse.Namespace,
+    *,
+    data_cfg: dict[str, Any],
+    model_cfg: dict[str, Any],
+    train_cfg: dict[str, Any],
+    paths: BackendPaths,
+) -> int:
     """Dispatch on ``train_cfg['stage']``."""
     stage = str(train_cfg.get("stage", "transformer")).lower()
     if stage in {"vqgan", "stage_0", "0"}:

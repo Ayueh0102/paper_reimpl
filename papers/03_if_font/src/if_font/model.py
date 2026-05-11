@@ -187,6 +187,13 @@ class VectorQuantizer(nn.Module):
         self.decay = cfg.decay
         self.eps = cfg.eps
         self.commitment_weight = cfg.commitment_weight
+        # Runtime flag — when False, EMA codebook updates are skipped even in
+        # training mode. Train.py flips this to False in Stage B/C where the
+        # VQ is treated as a frozen tokenizer; otherwise the codebook would
+        # drift under the AR objective (a moving CE target on a fixed codebook
+        # = unstable training). Default True preserves Stage-A behaviour and
+        # the existing smoke tests.
+        self.update_codebook: bool = True
 
         # Codebook initialised from a small normal; EMA buffers track usage.
         embed = torch.randn(cfg.codebook_size, cfg.embedding_dim) * 0.02
@@ -216,8 +223,8 @@ class VectorQuantizer(nn.Module):
         quantized_flat = F.embedding(indices_flat, self.embedding)
         quantized = quantized_flat.view(b, h, w, self.embedding_dim).permute(0, 3, 1, 2)
 
-        # EMA codebook update (only in training mode).
-        if self.training:
+        # EMA codebook update (only in training mode AND when not frozen).
+        if self.training and self.update_codebook:
             with torch.no_grad():
                 onehot = F.one_hot(indices_flat, self.codebook_size).type_as(flat)  # [N, K]
                 cluster_size = onehot.sum(dim=0)  # [K]
@@ -640,6 +647,16 @@ class IFFont(nn.Module):
         self.decoder = TransformerARDecoder(cfg)
         # Learned "null" IDS context, used when no ids tensor is provided.
         self.ids_null_token = nn.Parameter(torch.zeros(1, 1, cfg.d_model))
+        # Reference-token projection from VQ embedding_dim -> decoder d_model.
+        # Built eagerly here so the module always lives in ``state_dict()``,
+        # even if ``encode_refs_to_tokens`` is never called during training
+        # (e.g. Stage A, where refs are not used). Otherwise Stage B reload
+        # would fail with a missing-key error.
+        self._ref_proj: nn.Module = (
+            nn.Identity()
+            if cfg.vq.embedding_dim == cfg.d_model
+            else nn.Linear(cfg.vq.embedding_dim, cfg.d_model)
+        )
 
     # ------------------------------------------------------------------
     # Context building
@@ -648,15 +665,19 @@ class IFFont(nn.Module):
     def encode_refs_to_tokens(self, ref_images: torch.Tensor) -> torch.Tensor:
         """ref_images: [B, N, C, H, W] → embeds [B, N*n_tokens, D].
 
-        Reuses the VQ encoder + codebook (frozen or trainable depending on
-        stage) to convert each reference to a sequence of d_model-wide
-        embedding vectors derived from the codebook lookup. We then linearly
-        project from embedding_dim to d_model.
+        Reuses the VQ encoder + codebook to convert each reference to a
+        sequence of d_model-wide embedding vectors. We then linearly project
+        from embedding_dim to d_model.
+
+        Note: ref tokenization is gradient-disconnected by design. ``vq.encode``
+        returns long indices (no grad), and ``quantizer.lookup`` is
+        ``F.embedding`` over the codebook **buffer** (not a Parameter). VQ is
+        treated as a frozen tokenizer in Stage B/C — refs do not move the
+        codebook nor the VQ encoder via this path. The previous comment
+        claiming a straight-through estimator was incorrect.
         """
         b, n, c, h, w = ref_images.shape
         flat = ref_images.reshape(b * n, c, h, w)
-        # Note: we use indices → embedding lookup so the path stays gradient-
-        # connected through the quantizer's straight-through estimator.
         indices = self.vq.encode(flat)  # [B*N, n_tokens]
         embeds = self.vq.quantizer.lookup(indices)  # [B*N, n_tokens, D_vq]
         embeds = embeds.reshape(b, n * self.vq.n_tokens, self.cfg.vq.embedding_dim)
@@ -664,15 +685,7 @@ class IFFont(nn.Module):
 
     @property
     def ref_to_decoder_proj(self) -> nn.Module:
-        # Lazy-build so __init__ can run before knowing exact dims; cached.
-        if not hasattr(self, "_ref_proj"):
-            mod: nn.Module
-            if self.cfg.vq.embedding_dim == self.cfg.d_model:
-                mod = nn.Identity()
-            else:
-                mod = nn.Linear(self.cfg.vq.embedding_dim, self.cfg.d_model)
-            # Register so it participates in optimizer / .to(device).
-            self.add_module("_ref_proj", mod)
+        """Reference-token projection, built eagerly in ``__init__``."""
         return self._ref_proj
 
     def build_context(

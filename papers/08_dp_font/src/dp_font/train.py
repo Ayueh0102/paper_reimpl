@@ -15,6 +15,8 @@ fully-conditional and the fully-null predictions.
 
 from __future__ import annotations
 
+import argparse
+import logging
 import os
 import random
 from pathlib import Path
@@ -35,6 +37,9 @@ from .pinn_losses import pinn_loss
 
 
 __all__ = ["compute_loss", "main"]
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -198,9 +203,26 @@ def _build_diffusion(train_cfg: dict[str, Any], device: torch.device) -> Gaussia
     )
 
 
+def _worker_init_fn_factory(seed: int):
+    """Build a picklable worker_init_fn that seeds each worker deterministically.
+
+    Without this, multi-worker DataLoader workers get independent RNG states
+    and data ordering / synthesised stroke-orders drift between runs even
+    when the process is seeded — invalidating ablation comparisons.
+    """
+
+    def _init(worker_id: int) -> None:
+        worker_seed = seed + worker_id
+        random.seed(worker_seed)
+        np.random.seed(worker_seed)
+        torch.manual_seed(worker_seed)
+
+    return _init
+
+
 def _build_dataloader(
     *,
-    args,
+    args: argparse.Namespace,
     data_cfg: dict[str, Any],
     model_cfg: DPFontConfig,
     train_cfg: dict[str, Any],
@@ -213,6 +235,9 @@ def _build_dataloader(
         nw = 0
     max_refs = int(data_cfg.get("max_refs", 0))
     collate = _DPFontCollate(max_refs)
+    seed = int(train_cfg.get("seed", 42))
+    generator = torch.Generator()
+    generator.manual_seed(seed)
     return DataLoader(
         dataset,
         batch_size=bs,
@@ -220,17 +245,38 @@ def _build_dataloader(
         drop_last=False,
         num_workers=nw,
         collate_fn=collate,
+        generator=generator,
+        worker_init_fn=_worker_init_fn_factory(seed) if nw > 0 else None,
     )
 
 
-def _move_batch(batch: dict[str, Any], device: torch.device) -> dict[str, torch.Tensor]:
+def _move_batch(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
+    """Move all tensor values to ``device``; pass non-tensor values (metadata
+    dicts, lists) through unchanged. Return type is ``dict[str, Any]`` because
+    the batch is heterogeneous — only tensor fields are moved.
+    """
     out: dict[str, Any] = {}
     for k, v in batch.items():
         out[k] = v.to(device) if isinstance(v, torch.Tensor) else v
     return out
 
 
-def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
+def main(
+    args: argparse.Namespace,
+    *,
+    data_cfg: dict[str, Any],
+    model_cfg: dict[str, Any],
+    train_cfg: dict[str, Any],
+    paths: BackendPaths,
+) -> int:
+    # If the shared entrypoint / a hosting runner has not yet configured root
+    # logging, install a minimal default so our INFO lines are visible. This
+    # is idempotent — ``basicConfig`` is a no-op if handlers already exist.
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        )
     device = torch.device(args.device)
     _seed_everything(int(train_cfg.get("seed", 42)))
 
@@ -267,11 +313,20 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
         ckpt_dir = resolve_path(ckpt_dir, base=Path(__file__).resolve().parents[3])
         os.makedirs(ckpt_dir, exist_ok=True)
 
-    print(
-        f"[dp_font] device={device} steps={max_steps} bs={train_cfg.get('batch_size')} "
-        f"lr={lr} pinn_weight={pinn_weight} cfg_drop={cfg_drop} timesteps={diffusion.timesteps} "
-        f"pred={diffusion.prediction_target} schedule={diffusion.beta_schedule} "
-        f"img={cfg.image_size}px content_C={cfg.content_channels}"
+    logger.info(
+        "[dp_font] device=%s steps=%d bs=%s lr=%s pinn_weight=%s cfg_drop=%s "
+        "timesteps=%s pred=%s schedule=%s img=%dpx content_C=%d",
+        device,
+        max_steps,
+        train_cfg.get("batch_size"),
+        lr,
+        pinn_weight,
+        cfg_drop,
+        diffusion.timesteps,
+        diffusion.prediction_target,
+        diffusion.beta_schedule,
+        cfg.image_size,
+        cfg.content_channels,
     )
 
     model.train()
@@ -294,9 +349,12 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optim.step()
             if step % log_every == 0:
-                print(
-                    f"[dp_font] step={step} loss_total={log['loss_total']:.4f} "
-                    f"loss_simple={log['loss_simple']:.4f} loss_pinn={log['loss_pinn']:.4f}"
+                logger.info(
+                    "[dp_font] step=%d loss_total=%.4f loss_simple=%.4f loss_pinn=%.4f",
+                    step,
+                    log["loss_total"],
+                    log["loss_simple"],
+                    log["loss_pinn"],
                 )
             step += 1
             if step >= max_steps or args.dry_run:
@@ -307,7 +365,7 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
     if ckpt_dir is not None and not args.dry_run:
         path = Path(ckpt_dir) / "dp_font_last.pt"
         torch.save({"model": model.state_dict(), "cfg": cfg.__dict__}, path)
-        print(f"[dp_font] saved checkpoint -> {path}")
+        logger.info("[dp_font] saved checkpoint -> %s", path)
 
-    print(f"[dp_font] done; final_step={step} dry_run={args.dry_run}")
+    logger.info("[dp_font] done; final_step=%d dry_run=%s", step, args.dry_run)
     return 0

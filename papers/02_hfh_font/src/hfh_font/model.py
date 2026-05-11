@@ -20,13 +20,16 @@ Every non-trivial choice is logged in ``reports/blind_impl.md`` as either
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+_logger = logging.getLogger(__name__)
 
 __all__ = [
     "ModelConfig",
@@ -60,7 +63,7 @@ class ModelConfig:
     components_per_ref: int = 8
     dropout: float = 0.1
     diffusion_timesteps: int = 1000
-    diffusion_target: str = "x0"  # one of {"x0", "epsilon"}
+    diffusion_target: Literal["x0", "epsilon"] = "x0"
     sr_enabled: bool = False
     sr_scale: int = 2
 
@@ -108,7 +111,8 @@ class TinyVAE(nn.Module):
 
     def __init__(self, in_channels: int = 1, base_channels: int = 32, latent_channels: int = 4, down_factor: int = 8) -> None:
         super().__init__()
-        assert down_factor in (4, 8, 16), "down_factor must be one of 4/8/16"
+        if down_factor not in (4, 8, 16):
+            raise ValueError(f"down_factor must be one of 4/8/16, got {down_factor}")
         self.down_factor = down_factor
         self.latent_channels = latent_channels
         n_down = int(math.log2(down_factor))
@@ -201,10 +205,22 @@ class ComponentEncoder(nn.Module):
         self.backbone = nn.Sequential(*blocks)
         self.proj = nn.Conv2d(ch, d_ctx, 1)
         # Adaptive pool to ``components_per_ref`` tokens (a √K × √K grid).
-        side = int(round(components_per_ref ** 0.5))
+        # Non-perfect-square requests are rounded to the nearest perfect square
+        # and warned so the actual allocated token count is auditable.
+        requested = components_per_ref
+        side = int(round(requested ** 0.5))
         side = max(1, side)
+        actual = side * side
+        if actual != requested:
+            _logger.warning(
+                "ComponentEncoder: components_per_ref=%d is not a perfect square; "
+                "rounding to %d (side=%d) for the √K × √K adaptive pool grid.",
+                requested,
+                actual,
+                side,
+            )
         self.k_side = side
-        self.components_per_ref = side * side
+        self.components_per_ref = actual
         self.pool = nn.AdaptiveAvgPool2d(side)
 
     def forward(self, refs: torch.Tensor, ref_valid: torch.Tensor | None = None) -> torch.Tensor:
@@ -279,7 +295,8 @@ class _ResBlock(nn.Module):
 class _CrossAttention(nn.Module):
     def __init__(self, channels: int, d_ctx: int, n_heads: int) -> None:
         super().__init__()
-        assert channels % n_heads == 0, "channels must be divisible by n_heads"
+        if channels % n_heads != 0:
+            raise ValueError(f"channels ({channels}) must be divisible by n_heads ({n_heads})")
         self.n_heads = n_heads
         self.head_dim = channels // n_heads
         self.norm = nn.GroupNorm(8, channels)
@@ -662,10 +679,12 @@ class HFHFontModel(nn.Module):
         if content.shape[-1] != image.shape[-1]:
             content = F.interpolate(content, size=image.shape[-2:], mode="bilinear", align_corners=False)
 
-        # Student: pretend t = T-1, one-shot x0 prediction from pure noise.
+        # Student: pretend t = T-1, one-shot prediction from pure noise. The
+        # raw model output's interpretation (x0 vs ε) depends on
+        # ``diffusion.prediction_target``.
         t_max = torch.full((z0.shape[0],), diffusion.timesteps - 1, dtype=torch.long, device=z0.device)
         z_T = torch.randn_like(z0)
-        z0_student = self.forward(
+        student_pred = self.forward(
             z_T,
             t_max,
             content=content,
@@ -675,12 +694,19 @@ class HFHFontModel(nn.Module):
             ref_images=ref_images,
             ref_valid=ref_valid,
         )
+        # Convert the student output to x0 so we can re-noise it for the
+        # teacher pass — this is independent of the prediction target.
+        student_x0 = (
+            student_pred
+            if diffusion.prediction_target == "x0"
+            else diffusion.predict_x0(z_T, t_max, student_pred)
+        )
 
-        # Teacher: re-noise student output at random t, ask teacher to denoise.
+        # Teacher: re-noise student x0 at random t, ask teacher to denoise.
         with torch.no_grad():
             t = torch.randint(0, diffusion.timesteps, (z0.shape[0],), device=z0.device)
-            noise = torch.randn_like(z0_student)
-            z_t = diffusion.q_sample(z0_student.detach(), t, noise)
+            noise = torch.randn_like(student_x0)
+            z_t = diffusion.q_sample(student_x0.detach(), t, noise)
             teacher_pred = teacher.forward(
                 z_t,
                 t,
@@ -691,9 +717,25 @@ class HFHFontModel(nn.Module):
                 ref_images=ref_images,
                 ref_valid=ref_valid,
             )
-            teacher_x0 = teacher_pred if diffusion.prediction_target == "x0" else diffusion.predict_x0(z_t, t, teacher_pred)
 
-        loss = F.mse_loss(z0_student, teacher_x0)
+        # Compare apples-to-apples in the model's native prediction space:
+        #   * if target == "x0",      MSE on x0
+        #   * if target == "epsilon", MSE on ε
+        # We re-noise student_x0 with the same (t, noise) and recover the
+        # student's ε for the epsilon branch so the student loss is what the
+        # *student* would emit if asked to denoise z_t. This keeps the
+        # gradient flowing into student parameters via student_x0.
+        if diffusion.prediction_target == "x0":
+            loss = F.mse_loss(student_x0, teacher_pred)
+        else:
+            # ε = (z_t - sqrt(ᾱ_t) * x0) / sqrt(1 - ᾱ_t).
+            # Reconstruct the student's ε for the SAME z_t / t pair the
+            # teacher saw, so the comparison is in ε-space on both sides.
+            sqrt_alpha = diffusion.sqrt_alphas_cumprod[t].view(-1, 1, 1, 1)
+            sqrt_one_minus_alpha = diffusion.sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1, 1)
+            student_eps = (z_t - sqrt_alpha * student_x0) / sqrt_one_minus_alpha
+            loss = F.mse_loss(student_eps, teacher_pred)
+
         return {"loss": loss, "l_sds": loss.detach()}
 
     # ------------------------------------------------------------------

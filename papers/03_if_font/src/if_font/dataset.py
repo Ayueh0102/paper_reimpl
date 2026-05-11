@@ -147,10 +147,22 @@ class IFFontCollate:
     """Picklable collate function: stacks images + batch-encodes IDS.
 
     Constructor receives:
-      * tokenizer : IDSTokenizer — already fitted (or fitted lazily on first
-        call from the synthetic IDS strings, then frozen).
+      * tokenizer : IDSTokenizer — should be pre-fitted and frozen before the
+        DataLoader is constructed. Lazy collate-side fitting is supported only
+        for the single-process / dry-run path (``num_workers=0``); under
+        ``num_workers>0`` the fit happens inside a worker subprocess and the
+        mutation never reaches the main-process tokenizer. The safe default
+        path is: warm-pass the dataset, ``tokenizer.fit_from_strings(...)``,
+        ``tokenizer.freeze()``, *then* construct this collate.
       * max_refs  : number of reference glyphs to stack.
       * ids_max_len : decoder context length budget for IDS.
+
+    Lazy fit semantics:
+      * When ``fit_on_first_call=True`` and the tokenizer is **not** frozen,
+        the first batch grows the vocab from observed IDS strings.
+      * When the tokenizer is frozen (``tokenizer.is_frozen``), the lazy fit
+        becomes a no-op regardless of ``fit_on_first_call`` — unknown chars
+        fall back to UNK at encode time, which is the multi-worker-safe path.
     """
 
     def __init__(
@@ -168,9 +180,16 @@ class IFFontCollate:
         self._fitted = False
 
     def _maybe_fit(self, ids_strings: Sequence[str]) -> None:
+        # Gate: a frozen tokenizer is the multi-worker-safe path. Any
+        # collate-side mutation in a worker subprocess would not reach the
+        # main process, so we refuse to grow vocab from inside collate.
+        if self.tokenizer.is_frozen:
+            self._fitted = True
+            return
         if self._fitted or not self.fit_on_first_call:
             return
-        # Only grow the vocab — preserves the special / IDC layout.
+        # Single-process / dry-run only: grow the vocab from the first batch.
+        # Caller is responsible for ensuring num_workers=0 in this mode.
         self.tokenizer.fit_from_strings(ids_strings)
         self._fitted = True
 

@@ -57,10 +57,12 @@ class VQGANConfig:
     in_channels: int = 1
     """Grayscale glyph input. Set to 3 for RGB content fields."""
     base_channels: int = 64
-    channel_mult: tuple[int, ...] = (1, 2, 4)
-    """Per-stage channel multipliers. len(mult) controls the depth and hence
-    the downsample factor. For 128px -> 16x16 we want 3 stages of stride-2
-    => 2**3 = 8x downsample."""
+    channel_mult: tuple[int, ...] = (1, 1, 2, 4)
+    """Per-stage channel multipliers. ``len(channel_mult) - 1`` is the
+    number of stride-2 downsamples (the last stage's downsample is
+    ``Identity``). The paper-cited 16x16 latent grid for a 128px input
+    needs 3 stride-2 stages => 4 entries here. Default matches
+    ``configs/model.yaml``."""
     z_channels: int = 256
     """Latent channel width before / after the codebook (matches embed_dim)."""
     embed_dim: int = 256
@@ -76,12 +78,11 @@ class VQGANConfig:
         """Spatial size after the encoder.
 
         Encoder does ``len(channel_mult) - 1`` stride-2 downsamples (the last
-        stage's downsample is an ``Identity``). For the paper default
-        ``channel_mult=(1, 2, 4)`` and ``image_size=128`` this yields
-        ``128 / 2^2 = 32`` — note the **paper's 16x16 latent grid requires
-        4 stages of multipliers (or one extra stride-2)**. Our default
-        ``channel_mult=(1, 2, 4)`` produces a 32x32 grid; bump to
-        ``(1, 1, 2, 4)`` to hit the paper-cited 16x16. See blind_impl.md.
+        stage's downsample is an ``Identity``). For the paper-cited default
+        ``channel_mult=(1, 1, 2, 4)`` and ``image_size=128`` this yields
+        ``128 / 2^3 = 16``. Use a different length to change the
+        downsample factor — e.g. ``(1, 2, 4)`` (3 entries) gives a 32x32
+        latent grid for a 128px input.
         """
         return self.image_size // (2 ** (len(self.channel_mult) - 1))
 
@@ -265,7 +266,7 @@ class VQGANEncoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.stem(x)
-        for stage, down in zip(self.blocks, self.downsamples):
+        for stage, down in zip(self.blocks, self.downsamples, strict=True):
             h = stage(h)
             h = down(h)
         h = self.mid_res1(h)
@@ -310,7 +311,7 @@ class VQGANDecoder(nn.Module):
         h = self.mid_res1(h)
         h = self.mid_attn(h)
         h = self.mid_res2(h)
-        for stage, up in zip(self.blocks, self.upsamples):
+        for stage, up in zip(self.blocks, self.upsamples, strict=True):
             h = stage(h)
             h = up(h)
         return self.out_conv(F.silu(self.out_norm(h)))

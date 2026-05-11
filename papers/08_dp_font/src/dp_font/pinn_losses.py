@@ -124,7 +124,10 @@ def _sobel_kernels(device: torch.device, dtype: torch.dtype) -> tuple[torch.Tens
 
 def _grad_xy(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Sobel gradient (gx, gy) with replicate-padding."""
-    assert x.shape[1] == 1, "_grad_xy expects single-channel input"
+    if x.shape[1] != 1:
+        raise ValueError(
+            f"_grad_xy expects single-channel input, got shape {tuple(x.shape)}"
+        )
     kx, ky = _sobel_kernels(x.device, x.dtype)
     x_pad = F.pad(x, (1, 1, 1, 1), mode="replicate")
     return F.conv2d(x_pad, kx), F.conv2d(x_pad, ky)
@@ -160,7 +163,10 @@ def ink_diffusion_residual(
     Returns:
         Scalar mean residual squared per sample.
     """
-    assert x0_pred.dim() == 4 and x0_pred.shape[1] == 1, "expect [B,1,H,W]"
+    if x0_pred.dim() != 4 or x0_pred.shape[1] != 1:
+        raise ValueError(
+            f"ink_diffusion_residual expects [B,1,H,W], got {tuple(x0_pred.shape)}"
+        )
     lap = laplacian_2d(x0_pred)
     bg_mask = torch.sigmoid(-10.0 * (x0_pred - background_threshold)).detach()
     # PDE residual: ν ∇²I + s = 0  →  in the bg, source s≈0 so |ν ∇²I|² is
@@ -193,7 +199,10 @@ def nib_motion_smoothness(
     Returns:
         Scalar mean.
     """
-    assert x0_pred.dim() == 4 and x0_pred.shape[1] == 1, "expect [B,1,H,W]"
+    if x0_pred.dim() != 4 or x0_pred.shape[1] != 1:
+        raise ValueError(
+            f"nib_motion_smoothness expects [B,1,H,W], got {tuple(x0_pred.shape)}"
+        )
     if skeleton is None:
         sig = x0_pred
     else:
@@ -217,7 +226,10 @@ def stroke_continuity_penalty(x0_pred: torch.Tensor) -> torch.Tensor:
     Returns:
         Scalar mean.
     """
-    assert x0_pred.dim() == 4 and x0_pred.shape[1] == 1, "expect [B,1,H,W]"
+    if x0_pred.dim() != 4 or x0_pred.shape[1] != 1:
+        raise ValueError(
+            f"stroke_continuity_penalty expects [B,1,H,W], got {tuple(x0_pred.shape)}"
+        )
     # 3x3 mean kernel excluding self → equivalent to a box-blur minus the
     # centre pixel divided by 8.
     box = torch.ones(1, 1, 3, 3, device=x0_pred.device, dtype=x0_pred.dtype) / 9.0

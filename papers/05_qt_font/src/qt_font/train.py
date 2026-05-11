@@ -13,6 +13,7 @@ behaviour comes from the YAML configs, not from branching code.
 
 from __future__ import annotations
 
+import logging
 import random
 from dataclasses import asdict
 from typing import Any
@@ -23,12 +24,15 @@ from torch.utils.data import DataLoader
 
 from .dataset import SyntheticConfig, build_dataset
 from .model import (
+    ConditioningBundle,
     D3PMUniform,
     QTFontConfig,
     QTFontModel,
     build_qt_font,
     quantize_to_states,
 )
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
 # Loss                                                                         #
@@ -90,16 +94,17 @@ def compute_loss(
     )
 
     # Predict x_0 logits per leaf.
-    logits = model.predict_logits_from_states(
-        xt_states,
-        t,
+    cond_bundle = ConditioningBundle(
         content=batch["content"],
         char_id=char_id,
-        writer_id=writer_id,
         script_id=script_id,
+        writer_id=writer_id,
+        style_family_id=batch.get("style_family_id"),
+        unit_id=batch.get("unit_id"),
         ref_images=batch.get("refs"),
         ref_valid=batch.get("ref_valid"),
     )
+    logits = model.predict_logits_from_states(xt_states, t, cond_bundle)
     loss = diffusion.loss_x0_ce(logits, x0_states)
 
     with torch.no_grad():
@@ -214,8 +219,13 @@ def main(
         weight_decay=float(train_cfg.get("weight_decay", 0.01)),
     )
 
-    print(f"[qt_font] model params = {sum(p.numel() for p in model.parameters()):,}")
-    print(f"[qt_font] qt_cfg = {asdict(qt_cfg)}")
+    # Configure the root logger lazily — running under the shared entrypoint
+    # the parent may have configured handlers already; this is idempotent.
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    logger.info("model params = %s", f"{sum(p.numel() for p in model.parameters()):,}")
+    logger.info("qt_cfg = %s", asdict(qt_cfg))
     max_steps = int(train_cfg.get("max_steps", 10))
     log_every = int(train_cfg.get("log_every", 1))
     cfg_drop_prob = float(train_cfg.get("cfg_drop_prob", 0.1))
@@ -235,13 +245,13 @@ def main(
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         opt.step()
         if step % log_every == 0:
-            print(f"[qt_font] step={step} {log}")
+            logger.info("step=%d %s", step, log)
         step += 1
         if args.dry_run:
-            print("[qt_font] dry-run: stop after 1 step")
+            logger.info("dry-run: stop after 1 step")
             return 0
         if step >= max_steps:
             break
 
-    print(f"[qt_font] training done; total_steps={step}")
+    logger.info("training done; total_steps=%d", step)
     return 0

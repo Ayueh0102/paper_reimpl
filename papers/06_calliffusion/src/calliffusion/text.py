@@ -40,8 +40,18 @@ class StubTextEncoder(nn.Module):
 
     Tokenisation is the simplest thing that still exercises the
     "special-token expansion" code path: split the prompt on whitespace and
-    map each piece to a slot in a growing vocabulary. Unknown pieces get
-    the [UNK] id (= 1). [PAD] = 0, [CLS] = 2, [SEP] = 3.
+    map each piece to a slot in a pre-grown vocabulary. Tokens not in the
+    table get the [UNK] id (= 1). [PAD] = 0, [CLS] = 2, [SEP] = 3.
+
+    Vocabulary growth model:
+      - At construction the embedding table is sized to ``initial_vocab_size``
+        (>= NUM_SPECIAL).
+      - ``add_special_tokens(...)`` is the *only* allowed growth point. It
+        extends ``token_to_id`` and the embedding table for every new token.
+      - ``_tokenize`` is read-only — unknown tokens fall back to ``UNK_ID``.
+        This matches real BERT semantics (which never grows the vocab during
+        forward) and makes the encoder safe for multi-worker DataLoaders and
+        non-deterministic test ordering.
     """
 
     PAD_ID = 0
@@ -79,14 +89,18 @@ class StubTextEncoder(nn.Module):
     def add_special_tokens(self, tokens: Iterable[str]) -> int:
         """Append new special tokens; resize the embedding table.
 
-        Returns the number of *new* tokens added.
+        Returns the number of *new* tokens added. This is the only public
+        way to grow the vocabulary — once training begins, callers should
+        not invoke this again, since the embedding table is reallocated
+        (which would break optimizer state and any DataLoader worker
+        already iterating the encoder).
         """
         added = 0
         for tok in tokens:
-            tok = str(tok).strip()
-            if not tok or tok in self.token_to_id:
+            cleaned = str(tok).strip()
+            if not cleaned or cleaned in self.token_to_id:
                 continue
-            self.token_to_id[tok] = self._vocab_size
+            self.token_to_id[cleaned] = self._vocab_size
             self._vocab_size += 1
             added += 1
         if added:
@@ -99,23 +113,15 @@ class StubTextEncoder(nn.Module):
         return added
 
     def _tokenize(self, prompt: str) -> list[int]:
+        """Read-only tokenisation. Unknown pieces fall back to ``UNK_ID``.
+
+        Crucially this method does NOT mutate ``token_to_id`` or
+        ``embedding`` — preventing a data race when ``num_workers > 0`` and
+        keeping the embedding table deterministic across call order.
+        """
         ids: list[int] = [self.CLS_ID]
         for piece in str(prompt).split():
-            if piece in self.token_to_id:
-                ids.append(self.token_to_id[piece])
-            else:
-                # Auto-grow vocab on the fly so synthetic prompts always work.
-                # In production with real BERT this branch is not taken
-                # because the tokenizer handles unknowns.
-                self.token_to_id[piece] = self._vocab_size
-                self._vocab_size += 1
-                old = self.embedding
-                new = nn.Embedding(self._vocab_size, self.hidden_size, padding_idx=self.PAD_ID)
-                with torch.no_grad():
-                    new.weight[: old.num_embeddings].copy_(old.weight)
-                    new.weight[old.num_embeddings :].normal_(mean=0.0, std=0.02)
-                self.embedding = new.to(old.weight.device)
-                ids.append(self.token_to_id[piece])
+            ids.append(self.token_to_id.get(piece, self.UNK_ID))
         ids.append(self.SEP_ID)
         return ids[: self.max_length]
 

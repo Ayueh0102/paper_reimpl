@@ -15,7 +15,29 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from .model import D3PMUniform, QTFontModel, decode_states_to_image
+from .model import ConditioningBundle, D3PMUniform, QTFontModel
+
+
+def _bundle_from_kwargs(
+    content: torch.Tensor,
+    cond_kwargs: dict,
+) -> ConditioningBundle:
+    """Lift legacy keyword kwargs into a :class:`ConditioningBundle`.
+
+    Lets callers keep passing ``char_id=...`` etc. positionally without forcing
+    them to import the dataclass. Unknown kwargs are silently ignored so the
+    surface stays compatible with the cross-paper sampler harness.
+    """
+    return ConditioningBundle(
+        content=content,
+        char_id=cond_kwargs.get("char_id"),
+        script_id=cond_kwargs.get("script_id"),
+        writer_id=cond_kwargs.get("writer_id"),
+        style_family_id=cond_kwargs.get("style_family_id"),
+        unit_id=cond_kwargs.get("unit_id"),
+        ref_images=cond_kwargs.get("ref_images"),
+        ref_valid=cond_kwargs.get("ref_valid"),
+    )
 
 
 @torch.no_grad()
@@ -24,12 +46,7 @@ def sample_states(
     diffusion: D3PMUniform,
     *,
     batch_size: int,
-    content: torch.Tensor,
-    char_id: torch.Tensor | None = None,
-    writer_id: torch.Tensor | None = None,
-    script_id: torch.Tensor | None = None,
-    ref_images: torch.Tensor | None = None,
-    ref_valid: torch.Tensor | None = None,
+    cond_bundle: ConditioningBundle,
     temperature: float = 1.0,
     greedy_final_step: bool = True,
     device: torch.device | str = "cpu",
@@ -55,16 +72,7 @@ def sample_states(
 
     for t in reversed(range(diffusion.timesteps)):
         t_batch = torch.full((batch_size,), t, dtype=torch.long, device=device)
-        logits = model.predict_logits_from_states(
-            x_t,
-            t_batch,
-            content=content,
-            char_id=char_id,
-            writer_id=writer_id,
-            script_id=script_id,
-            ref_images=ref_images,
-            ref_valid=ref_valid,
-        )
+        logits = model.predict_logits_from_states(x_t, t_batch, cond_bundle)
         if temperature != 1.0:
             logits = logits / temperature
         probs = F.softmax(logits, dim=-1)
@@ -88,22 +96,34 @@ def sample_image(
     *,
     batch_size: int,
     content: torch.Tensor,
+    cond_bundle: ConditioningBundle | None = None,
     **cond_kwargs,
 ) -> torch.Tensor:
-    """Decode the predicted final state into a pixel image (B, 1, H, W)."""
+    """Decode the predicted final state into a pixel image (B, 1, H, W).
+
+    Accepts either a pre-built ``cond_bundle`` or legacy keyword args
+    (``char_id``, ``writer_id``, …) which are lifted into a bundle.
+    """
     cfg = model.cfg
+    if cond_bundle is None:
+        cond_bundle = _bundle_from_kwargs(content, cond_kwargs)
     states = sample_states(
         model,
         diffusion,
         batch_size=batch_size,
-        content=content,
+        cond_bundle=cond_bundle,
         device=content.device,
-        **cond_kwargs,
     )
-    one_hot = F.one_hot(states, num_classes=cfg.n_states).float()
-    # Convert one-hot back into "logits" (huge value at the picked class) so
-    # decode_states_to_image takes argmax-equivalent expected value.
-    pseudo_logits = (one_hot * 10.0) - 5.0
-    return decode_states_to_image(
-        pseudo_logits, depth=cfg.depth, n_states=cfg.n_states, image_size=cfg.image_size
+    # Decode argmax-state directly to bin centres in [-1, 1]. This avoids the
+    # previous "pseudo-logits" indirection (one-hot × _LOGIT_SCALE −offset → softmax
+    # → expected value) whose approximation degrades for large K.
+    bin_centers = torch.linspace(-1.0, 1.0, cfg.n_states + 1, device=states.device)
+    bin_centers = (bin_centers[:-1] + bin_centers[1:]) * 0.5  # (K,)
+    expected = bin_centers[states]  # (B, L)
+    grid = 2**cfg.depth
+    expected_grid = expected.reshape(batch_size, 1, grid, grid)
+    if cfg.image_size == grid:
+        return expected_grid
+    return F.interpolate(
+        expected_grid, size=(cfg.image_size, cfg.image_size), mode="bilinear", align_corners=False
     )

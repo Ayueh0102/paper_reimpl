@@ -180,8 +180,15 @@ class SelectiveScanSSM(nn.Module):
         A = -torch.exp(self.A_log.float())  # (d_model, d_state) negative real
         A_bar = torch.exp(dt.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(0))  # (B, L, d_model, d_state)
 
-        # B_bar = Δ * B (Euler discretization; Mamba uses ZOH but Euler is
-        # close enough for stable training — and easier to read).
+        # B_bar = Δ * B (Euler discretization). Canonical Mamba uses ZOH:
+        #   B_bar_ZOH = ((exp(Δ A) - 1) / A) * B
+        # The Euler approximation is the Taylor-series leading term and is
+        # accurate when Δ·A is small. With ``dt_proj.bias = -5.0`` init we
+        # have Δ ≈ softplus(-5) ≈ 6.7e-3 at init and A ∈ [-d_state, -1], so
+        # |Δ·A| ≤ 16 · 6.7e-3 ≈ 0.107 — well inside the regime where
+        # ``(exp(x)-1)/x ≈ 1`` to <5% error. Training-time growth of Δ keeps
+        # this approximation valid in practice; we leave a ZOH switch as a
+        # Phase-2 ablation hook (see reports/dl_review_blind.md Nit 1).
         B_bar = dt.unsqueeze(-1) * B.unsqueeze(-2)  # (B, L, d_model, d_state)
 
         # u_t = B_bar * x_conv, but multiply by the (B, L, d_model) input.

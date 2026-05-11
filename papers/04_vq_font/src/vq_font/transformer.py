@@ -97,7 +97,10 @@ class _MultiHeadAttention(nn.Module):
 
     def __init__(self, dim: int, num_heads: int, *, dropout: float = 0.0) -> None:
         super().__init__()
-        assert dim % num_heads == 0, "dim must be divisible by num_heads"
+        if dim % num_heads != 0:
+            raise ValueError(
+                f"_MultiHeadAttention: dim={dim} must be divisible by num_heads={num_heads}"
+            )
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = self.head_dim ** -0.5

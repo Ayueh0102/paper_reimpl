@@ -173,14 +173,14 @@ class MultiAttributeGuidance(nn.Module):
 
         scalar_in = int(cfg.use_ink_intensity) + int(cfg.use_font_size)
         self.scalar_proj = (
-            nn.Sequential(nn.Linear(scalar_in, d), nn.SiLU(inplace=True), nn.Linear(d, d))
+            nn.Sequential(nn.Linear(scalar_in, d), nn.SiLU(), nn.Linear(d, d))
             if scalar_in > 0
             else None
         )
 
         self.fuse = nn.Sequential(
             nn.Linear(d, d),
-            nn.SiLU(inplace=True),
+            nn.SiLU(),
             nn.Linear(d, d),
         )
 
@@ -197,7 +197,12 @@ class MultiAttributeGuidance(nn.Module):
             "char": self.cfg.char_vocab_size,
         }
 
-    def _clamp(self, ids: torch.Tensor | None, vocab: int, fallback: int) -> torch.Tensor | None:
+    def _clamp(self, ids: torch.Tensor | None, vocab: int) -> torch.Tensor | None:
+        """Clamp ids into ``[0, vocab]`` (inclusive — ``vocab`` is the null id).
+
+        Returns ``None`` unchanged so callers can substitute a full-null
+        tensor when the attribute is absent for the whole batch.
+        """
         if ids is None:
             return None
         return ids.clamp(0, vocab).long()
@@ -216,9 +221,9 @@ class MultiAttributeGuidance(nn.Module):
     ) -> torch.Tensor:
         """Return [B, cond_embed_dim]."""
         nulls = self.null_ids
-        w = self._clamp(writer_id, nulls["writer"], nulls["writer"])
-        s = self._clamp(script_id, nulls["script"], nulls["script"])
-        c = self._clamp(char_id, nulls["char"], nulls["char"])
+        w = self._clamp(writer_id, nulls["writer"])
+        s = self._clamp(script_id, nulls["script"])
+        c = self._clamp(char_id, nulls["char"])
 
         if w is None:
             w = torch.full((batch_size,), nulls["writer"], device=device, dtype=torch.long)
@@ -279,10 +284,10 @@ class _ConvBlock(nn.Module):
         self.body = nn.Sequential(
             nn.Conv2d(in_c, out_c, kernel_size=3, stride=stride, padding=1),
             _gn(out_c),
-            nn.SiLU(inplace=True),
+            nn.SiLU(),
             nn.Conv2d(out_c, out_c, kernel_size=3, stride=1, padding=1),
             _gn(out_c),
-            nn.SiLU(inplace=True),
+            nn.SiLU(),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -421,7 +426,7 @@ class DPFontUNet(nn.Module):
 
         self.time_mlp = nn.Sequential(
             nn.Linear(cfg.time_input_dim, cfg.time_embed_dim),
-            nn.SiLU(inplace=True),
+            nn.SiLU(),
             nn.Linear(cfg.time_embed_dim, cfg.time_embed_dim),
         )
 

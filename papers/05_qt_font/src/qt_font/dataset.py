@@ -11,12 +11,13 @@ papers and to give Stage A/B/C config a place to land.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterator
 from dataclasses import dataclass
 
 import torch
 from paper_reimpl_shared.runner.smoke import make_synthetic_batch
-from torch.utils.data import Dataset, IterableDataset
+from torch.utils.data import Dataset, IterableDataset, get_worker_info
 
 
 @dataclass
@@ -45,7 +46,24 @@ class SyntheticDataset(IterableDataset):
         self.cfg = cfg
 
     def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
-        for _ in range(self.cfg.length):
+        # Shard work across DataLoader workers so that ``num_workers > 0`` does
+        # not silently N-fold the epoch (each worker would otherwise run the
+        # full iterator independently).
+        info = get_worker_info()
+        if info is None:
+            start, end = 0, self.cfg.length
+            worker_id = 0
+        else:
+            per_worker = int(math.ceil(self.cfg.length / info.num_workers))
+            start = info.id * per_worker
+            end = min(start + per_worker, self.cfg.length)
+            worker_id = info.id
+
+        for i in range(start, end):
+            # Derive a per-sample seed so that runs with the same
+            # ``SyntheticConfig.seed`` produce identical streams (and so each
+            # worker draws distinct samples).
+            sample_seed = self.cfg.seed + worker_id * self.cfg.length + i
             batch = make_synthetic_batch(
                 batch_size=1,
                 image_size=self.cfg.image_size,
@@ -54,6 +72,7 @@ class SyntheticDataset(IterableDataset):
                 writer_vocab_size=self.cfg.writer_vocab_size,
                 n_refs=self.cfg.n_refs,
                 device="cpu",
+                seed=sample_seed,
             )
             # The shared smoke generator yields content with 3 channels; we may
             # downcast to ``content_channels`` if the model wants fewer (eg. 1

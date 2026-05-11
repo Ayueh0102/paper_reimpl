@@ -31,6 +31,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# Quadtree fan-out: every internal node has exactly four children (NE/NW/SE/SW).
+# Surfaces explicitly so the constant is grep-able and reviewable in one place.
+_QUAD = 4
+
 # --------------------------------------------------------------------------- #
 # Quadtree construction                                                       #
 # --------------------------------------------------------------------------- #
@@ -41,7 +45,7 @@ def _full_quadtree_offsets(depth: int) -> tuple[list[int], list[int]]:
 
     Level 0 = single root, level d = 4^d nodes. Total nodes = (4^(d+1)-1)/3.
     """
-    level_size = [4**lvl for lvl in range(depth + 1)]
+    level_size = [_QUAD**lvl for lvl in range(depth + 1)]
     level_start: list[int] = [0]
     for s in level_size[:-1]:
         level_start.append(level_start[-1] + s)
@@ -61,15 +65,15 @@ def _build_parent_child_index(depth: int) -> tuple[torch.Tensor, torch.Tensor]:
     level_start, level_size = _full_quadtree_offsets(depth)
     total = level_start[-1] + level_size[-1]
     parent_of = torch.full((total,), -1, dtype=torch.long)
-    child_of = torch.full((total, 4), -1, dtype=torch.long)
+    child_of = torch.full((total, _QUAD), -1, dtype=torch.long)
     for lvl in range(depth):
         s = level_start[lvl]
         n = level_size[lvl]
         s_next = level_start[lvl + 1]
         for k in range(n):
             cur = s + k
-            for c in range(4):
-                ch = s_next + k * 4 + c
+            for c in range(_QUAD):
+                ch = s_next + k * _QUAD + c
                 child_of[cur, c] = ch
                 parent_of[ch] = cur
     return parent_of, child_of
@@ -84,7 +88,7 @@ def _build_leaf_sibling_index(depth: int, image_size: int) -> tuple[torch.Tensor
     leaf_xy        : LongTensor (L, 2)  — (row, col) of each leaf in the 2^d × 2^d grid
     """
     grid = 2**depth
-    leaf_neighbors = torch.full((grid * grid, 4), -1, dtype=torch.long)
+    leaf_neighbors = torch.full((grid * grid, _QUAD), -1, dtype=torch.long)
     leaf_xy = torch.zeros((grid * grid, 2), dtype=torch.long)
     for r in range(grid):
         for c in range(grid):
@@ -119,7 +123,7 @@ def quantize_to_states(image: torch.Tensor, *, depth: int, n_states: int) -> tor
     if image.dim() != 4:
         raise ValueError(f"expected (B,1,H,W), got {tuple(image.shape)}")
     grid = 2**depth
-    B, C, H, W = image.shape
+    B, _C, H, W = image.shape
     if H % grid != 0 or W % grid != 0:
         raise ValueError(f"image size {H}x{W} not divisible by 2^depth={grid}")
     pooled = F.adaptive_avg_pool2d(image, (grid, grid))  # (B, C, grid, grid)
@@ -179,7 +183,7 @@ def build_quadtree_states(
 # --------------------------------------------------------------------------- #
 
 
-class D3PMUniform:
+class D3PMUniform(nn.Module):
     """Discrete diffusion with uniform transition matrix.
 
     Following Austin et al. 2021 (D3PM). The transition matrix at step t is::
@@ -192,6 +196,12 @@ class D3PMUniform:
 
     where ᾱ_t = Π (1 - β_s). We only need q(x_t | x_0) which is a single
     categorical sample.
+
+    The schedule tensors ``betas`` and ``alphas_cumprod`` are registered as
+    buffers so they move with ``.to(device)`` and do not require a per-step
+    cross-device copy inside :meth:`q_probs`. ``t`` may be drawn from
+    ``[0, T-1]``; ``t=0`` means "one step of noise added", not "clean x_0",
+    matching the sampler convention of iterating ``reversed(range(T))``.
     """
 
     def __init__(
@@ -203,13 +213,17 @@ class D3PMUniform:
         beta_end: float = 0.02,
         device: torch.device | str = "cpu",
     ) -> None:
+        super().__init__()
         self.n_states = int(n_states)
         self.timesteps = int(timesteps)
         betas = torch.linspace(beta_start, beta_end, self.timesteps, dtype=torch.float32, device=device)
         alphas = 1.0 - betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
-        self.betas = betas
-        self.alphas_cumprod = alphas_cumprod  # ᾱ_t, shape (T,)
+        # Register as non-persistent buffers: they move with `.to(device)` but
+        # are deterministic functions of (timesteps, beta_start, beta_end) so
+        # there's no need to persist them in state_dict.
+        self.register_buffer("betas", betas, persistent=False)
+        self.register_buffer("alphas_cumprod", alphas_cumprod, persistent=False)
 
     def q_probs(self, x0: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """q(x_t | x_0) as a categorical probability tensor.
@@ -224,7 +238,17 @@ class D3PMUniform:
         probs : Tensor (B, L, K)
         """
         K = self.n_states
-        alpha_bar = self.alphas_cumprod.to(x0.device).gather(0, t)  # (B,)
+        # ``alphas_cumprod`` lives on the same device as the module after the
+        # caller does ``diffusion.to(device)``; assert rather than silently
+        # paying a per-step host↔device transfer.
+        if self.alphas_cumprod.device != x0.device:
+            raise RuntimeError(
+                f"D3PMUniform device {self.alphas_cumprod.device} != x0 device {x0.device}. "
+                "Call `diffusion.to(x0.device)` once at construction."
+            )
+        alpha_bar = self.alphas_cumprod.gather(0, t)  # (B,)
+        # alpha_bar.view(-1, 1, 1) broadcasts over the leaf dim (L) and the
+        # state dim (K) of the (B, L, K) one-hot tensor below.
         alpha_bar = alpha_bar.view(-1, 1, 1)
         one_hot = F.one_hot(x0, num_classes=K).float()  # (B, L, K)
         return alpha_bar * one_hot + (1.0 - alpha_bar) / K
@@ -245,8 +269,8 @@ class D3PMUniform:
 
         ``logits`` shape (B, L, K); ``x0`` shape (B, L).
         """
-        B, L, K = logits.shape
-        return F.cross_entropy(logits.reshape(B * L, K), x0.reshape(B * L))
+        _B, _L, K = logits.shape
+        return F.cross_entropy(logits.reshape(-1, K), x0.reshape(-1))
 
 
 # --------------------------------------------------------------------------- #
@@ -315,7 +339,7 @@ class ContentAwarePool(nn.Module):
 
         Returns (B, P, C) aggregated parent features.
         """
-        B, L, C = leaf_x.shape
+        B, _L, C = leaf_x.shape
         P, K = child_of_parents.shape
         idx = child_of_parents.clamp_min(0).reshape(-1)
         gathered = leaf_x[:, idx, :].reshape(B, P, K, C)
@@ -389,6 +413,33 @@ class ContentEncoder(nn.Module):
 
 
 @dataclass
+class ConditioningBundle:
+    """Container for all non-time conditioning signals.
+
+    Bundling these means ``encode_conditioning`` / ``predict_logits_*`` /
+    ``sample_states`` take one dataclass instead of a long argument list. The
+    timestep tensor stays a positional arg because it is the diffusion
+    variable (changes every step), whereas everything in this bundle is
+    typically constructed once per batch.
+
+    All fields default to ``None`` so callers only fill the channels they need;
+    the model fills any missing id with its learned null embedding (for
+    classifier-free guidance) and skips the style encoder if ``ref_images`` is
+    absent. ``style_family_id`` and ``unit_id`` are accepted for cross-paper
+    signature compatibility and currently ignored by QT-Font.
+    """
+
+    content: torch.Tensor
+    char_id: torch.Tensor | None = None
+    script_id: torch.Tensor | None = None
+    writer_id: torch.Tensor | None = None
+    style_family_id: torch.Tensor | None = None
+    unit_id: torch.Tensor | None = None
+    ref_images: torch.Tensor | None = None
+    ref_valid: torch.Tensor | None = None
+
+
+@dataclass
 class QTFontConfig:
     """Configuration for QTFontModel.
 
@@ -428,8 +479,21 @@ class QTFontModel(nn.Module):
     def __init__(self, cfg: QTFontConfig) -> None:
         super().__init__()
         self.cfg = cfg
+        self._build_graph_buffers(cfg)
+        self._build_conditioning_modules(cfg)
+        self._build_graph_modules(cfg)
 
-        # Buffers for graph topology (built once).
+    # ------------------------------------------------------------------ #
+    # __init__ helpers (split for readability and unit-testability)       #
+    # ------------------------------------------------------------------ #
+
+    def _build_graph_buffers(self, cfg: QTFontConfig) -> None:
+        """Topology buffers: parent/child indices, neighbour grids, leaf maps.
+
+        Pure index gymnastics — no learnable parameters. All registered as
+        non-persistent buffers so they ride along on ``.to(device)`` calls
+        but stay out of ``state_dict``.
+        """
         parent_of, child_of = _build_parent_child_index(cfg.depth)
         leaf_neigh, leaf_xy = _build_leaf_sibling_index(cfg.depth, cfg.image_size)
         self.register_buffer("parent_of", parent_of, persistent=False)
@@ -437,7 +501,7 @@ class QTFontModel(nn.Module):
         self.register_buffer("leaf_neigh", leaf_neigh, persistent=False)
         self.register_buffer("leaf_xy", leaf_xy, persistent=False)
 
-        # Leaves = last level of the tree; parents = penultimate level (coarse graph).
+        # Leaves = last level; parents = penultimate level (coarse graph).
         level_start, level_size = _full_quadtree_offsets(cfg.depth)
         leaf_start = level_start[-1]
         leaf_end = leaf_start + level_size[-1]
@@ -450,33 +514,33 @@ class QTFontModel(nn.Module):
 
         # Per-parent child indices in leaf-local coords (subtract leaf_start).
         parent_children = child_of[parent_start:parent_end].clone()  # (P, 4) global ids
-        # All children of parents at penultimate level are leaves, so subtract.
         mask = parent_children >= 0
         parent_children_local = parent_children.clone()
         parent_children_local[mask] = parent_children[mask] - leaf_start
         self.register_buffer("parent_children_local", parent_children_local, persistent=False)
 
-        # Precompute the inverse map: leaf id → parent id within the coarse level.
+        # Inverse map: leaf id → parent id within the coarse level.
         leaf_to_parent = torch.zeros(level_size[-1], dtype=torch.long)
         for p in range(level_size[-2]):
-            for k in range(4):
+            for k in range(_QUAD):
                 lid = int(parent_children_local[p, k].item())
                 if 0 <= lid < level_size[-1]:
                     leaf_to_parent[lid] = p
         self.register_buffer("leaf_to_parent", leaf_to_parent, persistent=False)
 
-        # Coarse-graph neighbours: parents are arranged on a 2^(depth-1) grid.
+        # Coarse-graph neighbours: parents live on a 2^(depth-1) grid.
         coarse_neigh, _coarse_xy = _build_leaf_sibling_index(cfg.depth - 1, cfg.image_size)
         self.register_buffer("coarse_neigh", coarse_neigh, persistent=False)
 
-        # State + position embeddings for leaves.
+    def _build_conditioning_modules(self, cfg: QTFontConfig) -> None:
+        """Conditioning encoders + embedding tables (time, content, style, ids)."""
+        # State + 2D positional embeddings for leaves.
         self.state_embed = nn.Embedding(cfg.n_states, cfg.hidden_dim)
-        # Position emb: 2D sinusoidal-like learnable embedding indexed by (r, c).
         grid = 2**cfg.depth
         self.row_embed = nn.Embedding(grid, cfg.hidden_dim)
         self.col_embed = nn.Embedding(grid, cfg.hidden_dim)
 
-        # Conditioning encoders.
+        # Time / content / style.
         self.time_mlp = nn.Sequential(
             nn.Linear(cfg.time_embed_dim, cfg.hidden_dim),
             nn.GELU(),
@@ -486,14 +550,17 @@ class QTFontModel(nn.Module):
         self.content_proj = nn.Linear(cfg.content_embed_dim, cfg.hidden_dim)
         self.style_encoder = StyleEncoder(cfg.ref_channels, cfg.style_embed_dim)
         self.style_proj = nn.Linear(cfg.style_embed_dim, cfg.hidden_dim)
-        self.char_embed = nn.Embedding(cfg.char_vocab_size + 1, cfg.hidden_dim)  # +1 for null
+
+        # Categorical embeddings (+1 row each for the CFG null id).
+        self.char_embed = nn.Embedding(cfg.char_vocab_size + 1, cfg.hidden_dim)
         self.writer_embed = nn.Embedding(cfg.writer_vocab_size + 1, cfg.hidden_dim)
         self.script_embed = nn.Embedding(cfg.script_vocab_size + 1, cfg.hidden_dim)
         self.null_char_id = cfg.char_vocab_size
         self.null_writer_id = cfg.writer_vocab_size
         self.null_script_id = cfg.script_vocab_size
 
-        # Dual graph stacks.
+    def _build_graph_modules(self, cfg: QTFontConfig) -> None:
+        """Dual quadtree graph stacks, content-aware pool, broadcast, and head."""
         self.fine_layers = nn.ModuleList(
             [GraphConv(cfg.hidden_dim, cfg.hidden_dim) for _ in range(cfg.n_layers)]
         )
@@ -501,10 +568,8 @@ class QTFontModel(nn.Module):
             [GraphConv(cfg.hidden_dim, cfg.hidden_dim) for _ in range(cfg.n_layers)]
         )
         self.pool = ContentAwarePool(cfg.hidden_dim)
-
         # Coarse → fine broadcast through a small MLP.
         self.parent_to_child = nn.Linear(cfg.hidden_dim, cfg.hidden_dim)
-
         # Output head: per-leaf state logits.
         self.head = nn.Sequential(
             nn.LayerNorm(cfg.hidden_dim),
@@ -512,7 +577,6 @@ class QTFontModel(nn.Module):
             nn.GELU(),
             nn.Linear(cfg.hidden_dim, cfg.n_states),
         )
-
         self.dropout = nn.Dropout(cfg.dropout)
         self.ref_dropout_p = cfg.ref_dropout
 
@@ -522,52 +586,55 @@ class QTFontModel(nn.Module):
 
     def encode_conditioning(
         self,
-        *,
         timesteps: torch.Tensor,
-        content: torch.Tensor,
-        char_id: torch.Tensor | None,
-        writer_id: torch.Tensor | None,
-        script_id: torch.Tensor | None,
-        ref_images: torch.Tensor | None,
-        ref_valid: torch.Tensor | None,
+        cond_bundle: ConditioningBundle,
     ) -> torch.Tensor:
+        """Fuse (timesteps, content, style, ids) into a single (B, hidden) vector.
+
+        Missing categorical ids fall back to the learned null-id row to keep the
+        classifier-free guidance path consistent. ``style_family_id`` and
+        ``unit_id`` are part of :class:`ConditioningBundle` for cross-paper
+        compatibility but are ignored here.
+        """
         cfg = self.cfg
         time_in = _timestep_embedding(timesteps, cfg.time_embed_dim)
-        time_emb = self.time_mlp(time_in)
-        cond = time_emb
+        cond = self.time_mlp(time_in)
 
-        content_emb = self.content_proj(self.content_encoder(content))
-        cond = cond + content_emb
+        cond = cond + self.content_proj(self.content_encoder(cond_bundle.content))
 
-        if ref_images is not None:
-            style_vec = self.style_encoder(ref_images, ref_valid)
+        if cond_bundle.ref_images is not None:
+            style_vec = self.style_encoder(cond_bundle.ref_images, cond_bundle.ref_valid)
             cond = cond + self.style_proj(style_vec)
 
-        if char_id is not None:
-            cond = cond + self.char_embed(char_id)
-        else:
-            cond = cond + self.char_embed(
-                torch.full(
-                    (cond.shape[0],), self.null_char_id, dtype=torch.long, device=cond.device
-                )
-            )
-        if writer_id is not None:
-            cond = cond + self.writer_embed(writer_id)
-        else:
-            cond = cond + self.writer_embed(
-                torch.full(
-                    (cond.shape[0],), self.null_writer_id, dtype=torch.long, device=cond.device
-                )
-            )
-        if script_id is not None:
-            cond = cond + self.script_embed(script_id)
-        else:
-            cond = cond + self.script_embed(
-                torch.full(
-                    (cond.shape[0],), self.null_script_id, dtype=torch.long, device=cond.device
-                )
-            )
+        cond = cond + self._embed_id_with_null(
+            cond_bundle.char_id, self.char_embed, self.null_char_id, cond
+        )
+        cond = cond + self._embed_id_with_null(
+            cond_bundle.writer_id, self.writer_embed, self.null_writer_id, cond
+        )
+        cond = cond + self._embed_id_with_null(
+            cond_bundle.script_id, self.script_embed, self.null_script_id, cond
+        )
         return cond  # (B, hidden)
+
+    @staticmethod
+    def _embed_id_with_null(
+        ids: torch.Tensor | None,
+        embed: nn.Embedding,
+        null_id: int,
+        ref_tensor: torch.Tensor,
+    ) -> torch.Tensor:
+        """Embed ``ids``, or the all-null row if ``ids is None``.
+
+        ``ref_tensor`` is only used to source ``batch_size`` and ``device`` when
+        synthesising the null id tensor.
+        """
+        if ids is not None:
+            return embed(ids)
+        null = torch.full(
+            (ref_tensor.shape[0],), null_id, dtype=torch.long, device=ref_tensor.device
+        )
+        return embed(null)
 
     def predict_state_logits(
         self,
@@ -578,7 +645,6 @@ class QTFontModel(nn.Module):
 
         Returns per-leaf state logits (B, L, K).
         """
-        B, L = leaf_states.shape
         h = self.state_embed(leaf_states)  # (B, L, C)
         # Add 2D positional embeddings.
         row = self.leaf_xy[:, 0]
@@ -628,24 +694,27 @@ class QTFontModel(nn.Module):
         runs the dual quadtree graph denoiser, decodes back to a pixel image.
         This makes the model drop-in for the shared GaussianDiffusion sampler
         and the smoke-test harness, even though the *native* training loss
-        operates on discrete state logits (see :func:`compute_native_loss`).
+        operates on discrete state logits (see :func:`qt_font.train.compute_loss`).
 
-        ``style_family_id`` and ``unit_id`` are accepted for cross-paper
-        signature compatibility and ignored (QT-Font does not use them).
+        The broad keyword surface is preserved here for cross-paper signature
+        compatibility (shared smoke harness calls every model with the same
+        kwargs); internally we collapse it into a :class:`ConditioningBundle`
+        and delegate. ``style_family_id`` and ``unit_id`` are stored on the
+        bundle but currently ignored by QT-Font.
         """
-        del style_family_id, unit_id  # not used
-        cfg = self.cfg
-        # Quantize x_t into leaf states.
-        leaf_states = quantize_to_states(x_t, depth=cfg.depth, n_states=cfg.n_states)
-        cond = self.encode_conditioning(
-            timesteps=timesteps,
+        bundle = ConditioningBundle(
             content=content,
             char_id=char_id,
-            writer_id=writer_id,
             script_id=script_id,
+            writer_id=writer_id,
+            style_family_id=style_family_id,
+            unit_id=unit_id,
             ref_images=ref_images,
             ref_valid=ref_valid,
         )
+        cfg = self.cfg
+        leaf_states = quantize_to_states(x_t, depth=cfg.depth, n_states=cfg.n_states)
+        cond = self.encode_conditioning(timesteps, bundle)
         logits = self.predict_state_logits(leaf_states, cond)
         return decode_states_to_image(
             logits, depth=cfg.depth, n_states=cfg.n_states, image_size=cfg.image_size
@@ -656,48 +725,20 @@ class QTFontModel(nn.Module):
         self,
         x_t: torch.Tensor,
         timesteps: torch.Tensor,
-        *,
-        content: torch.Tensor,
-        char_id: torch.Tensor | None = None,
-        writer_id: torch.Tensor | None = None,
-        script_id: torch.Tensor | None = None,
-        ref_images: torch.Tensor | None = None,
-        ref_valid: torch.Tensor | None = None,
+        cond_bundle: ConditioningBundle,
     ) -> torch.Tensor:
         cfg = self.cfg
         leaf_states = quantize_to_states(x_t, depth=cfg.depth, n_states=cfg.n_states)
-        cond = self.encode_conditioning(
-            timesteps=timesteps,
-            content=content,
-            char_id=char_id,
-            writer_id=writer_id,
-            script_id=script_id,
-            ref_images=ref_images,
-            ref_valid=ref_valid,
-        )
+        cond = self.encode_conditioning(timesteps, cond_bundle)
         return self.predict_state_logits(leaf_states, cond)
 
     def predict_logits_from_states(
         self,
         leaf_states: torch.Tensor,
         timesteps: torch.Tensor,
-        *,
-        content: torch.Tensor,
-        char_id: torch.Tensor | None = None,
-        writer_id: torch.Tensor | None = None,
-        script_id: torch.Tensor | None = None,
-        ref_images: torch.Tensor | None = None,
-        ref_valid: torch.Tensor | None = None,
+        cond_bundle: ConditioningBundle,
     ) -> torch.Tensor:
-        cond = self.encode_conditioning(
-            timesteps=timesteps,
-            content=content,
-            char_id=char_id,
-            writer_id=writer_id,
-            script_id=script_id,
-            ref_images=ref_images,
-            ref_valid=ref_valid,
-        )
+        cond = self.encode_conditioning(timesteps, cond_bundle)
         return self.predict_state_logits(leaf_states, cond)
 
 

@@ -44,9 +44,13 @@ class _FrozenCondAdapter(nn.Module):
     ) -> None:
         super().__init__()
         self.model = model
-        self.stroke_order = stroke_order
-        self.ink_intensity = ink_intensity
-        self.font_size = font_size
+        # Register as buffers so ``.to(device)`` / ``.half()`` etc. move them
+        # along with the rest of the module. Plain attribute assignment would
+        # silently leave the tensors stranded on the original device when AMP
+        # or device-transfer is invoked after construction.
+        self.register_buffer("stroke_order", stroke_order, persistent=False)
+        self.register_buffer("ink_intensity", ink_intensity, persistent=False)
+        self.register_buffer("font_size", font_size, persistent=False)
 
     def forward(self, x_t, timesteps, **kwargs):  # type: ignore[no-untyped-def]
         return self.model(

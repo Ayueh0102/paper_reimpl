@@ -11,6 +11,7 @@ Plumbed for the shared entrypoint ``paper_reimpl_shared.runner.entrypoint``::
 
 from __future__ import annotations
 
+import argparse
 import os
 import random
 from pathlib import Path
@@ -167,7 +168,7 @@ class _CollateNoRefs:
 
 def _build_dataloader(
     *,
-    args,
+    args: argparse.Namespace,
     data_cfg: dict[str, Any],
     model_cfg: MoyunConfig,
     train_cfg: dict[str, Any],
@@ -198,7 +199,14 @@ def _move_batch(batch: dict[str, Any], device: torch.device) -> dict[str, torch.
     return out
 
 
-def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
+def main(
+    args: argparse.Namespace,
+    *,
+    data_cfg: dict[str, Any],
+    model_cfg: dict[str, Any],
+    train_cfg: dict[str, Any],
+    paths: BackendPaths,
+) -> int:
     """Entrypoint dispatched from ``paper_reimpl_shared.runner.entrypoint``."""
     device = torch.device(args.device)
     _seed_everything(int(train_cfg.get("seed", 42)))

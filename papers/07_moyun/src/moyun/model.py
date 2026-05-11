@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
@@ -124,7 +124,7 @@ class MoyunConfig:
     token. So the *usable* id range is [1, vocab_size); during smoke we shift
     indices by +1 inside ``Moyun.forward``."""
 
-    extra: dict = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------------------
@@ -241,7 +241,11 @@ class PatchUnembed(nn.Module):
     def forward(self, x: torch.Tensor, grid_hw: tuple[int, int]) -> torch.Tensor:
         b, seq_len, c = x.shape
         hh, ww = grid_hw
-        assert seq_len == hh * ww, f"L={seq_len} doesn't match grid {hh}x{ww}"
+        # Use ``raise`` rather than ``assert`` so the invariant survives
+        # Python's ``-O`` flag (which strips assertions). A mismatch here
+        # would cause a silent shape error in the reshape below.
+        if seq_len != hh * ww:
+            raise ValueError(f"L={seq_len} doesn't match grid {hh}x{ww}")
         h = x.transpose(1, 2).reshape(b, c, hh, ww)
         return self.proj(h)  # (B, out_channels, H, W)
 

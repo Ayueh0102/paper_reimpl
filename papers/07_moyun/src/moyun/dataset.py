@@ -19,6 +19,7 @@ we fall back to ``SyntheticCalligraphyDataset`` (also from shared).
 
 from __future__ import annotations
 
+import argparse
 from typing import Any
 
 from torch.utils.data import Dataset
@@ -45,9 +46,9 @@ class MoyunTripleLabelDataset(CalligraphyJsonlDataset):
 
 def build_dataset(
     *,
-    args,
+    args: argparse.Namespace,
     data_cfg: dict[str, Any],
-    model_cfg,
+    model_cfg: Any,
     paths: BackendPaths,
 ) -> Dataset:
     """Pick between synthetic and manifest-backed dataset.

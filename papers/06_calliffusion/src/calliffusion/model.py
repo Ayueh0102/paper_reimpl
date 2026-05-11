@@ -14,7 +14,7 @@ Architecture summary (per ``paper_notes/06.md`` §2):
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
 import torch
@@ -207,6 +207,18 @@ class CalliffusionUNetConfig:
             raise ValueError(
                 f"base_channels {self.base_channels} must be divisible by num_heads {self.num_heads}"
             )
+        # Each stage_channels[i] = base_channels * channel_mult[i] flows into
+        # SpatialSelfAttention / SpatialCrossAttention, which reshape on
+        # ``head_dim = channels // num_heads``. A non-divisible stage width
+        # would crash deep inside ``forward`` with a cryptic reshape error
+        # rather than at startup.
+        for mult in self.channel_mult:
+            stage_ch = self.base_channels * int(mult)
+            if stage_ch % self.num_heads != 0:
+                raise ValueError(
+                    f"stage channel {stage_ch} (base {self.base_channels} x mult {mult}) "
+                    f"not divisible by num_heads {self.num_heads}"
+                )
 
 
 class CalliffusionUNet(nn.Module):
@@ -390,7 +402,7 @@ class CalliffusionUNet(nn.Module):
         for p in self.parameters():
             p.requires_grad = False
 
-    def unfreeze(self, predicate=lambda name: True) -> None:
+    def unfreeze(self, predicate: Callable[[str], bool] = lambda name: True) -> None:
         for name, p in self.named_parameters():
             if predicate(name):
                 p.requires_grad = True

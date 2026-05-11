@@ -57,6 +57,7 @@ class CalliffusionPromptDataset(Dataset):
         content_channels: list[str] | None = None,
         max_refs: int = 0,
         prompt_dropout_p: float = 0.1,
+        seed: int = 0,
     ) -> None:
         # Calliffusion does NOT use a content_field channel; we pass an empty
         # list so the shared loader skips the npz. ``CalligraphyJsonlDataset``
@@ -74,6 +75,11 @@ class CalliffusionPromptDataset(Dataset):
             content_channels=content_channels,
             max_refs=max_refs,
         )
+        # Local RNG so prompt-dropout is reproducible per dataset instance and
+        # immune to changes in module-global ``random`` state (which leaks
+        # across DataLoader workers and other modules). Mirrors
+        # ``SyntheticPromptDataset._rng``.
+        self._rng = random.Random(int(seed))
 
     def __len__(self) -> int:
         return len(self._inner)
@@ -86,7 +92,7 @@ class CalliffusionPromptDataset(Dataset):
         item = self._inner[index]
         row = item["metadata"]
         prompt = _row_to_prompt(row, self.cfg)
-        if self.cfg.prompt_dropout_p > 0 and random.random() < self.cfg.prompt_dropout_p:
+        if self.cfg.prompt_dropout_p > 0 and self._rng.random() < self.cfg.prompt_dropout_p:
             prompt = ""
         return {
             "image": item["image"],

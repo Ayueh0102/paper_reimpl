@@ -70,6 +70,16 @@ class VQFontConfig:
                 "VQFontConfig: transformer.embed_dim must equal vqgan.embed_dim; "
                 f"got {self.transformer.embed_dim} vs {self.vqgan.embed_dim}"
             )
+        # Catch latent-grid mismatches at config-build time so a forward-pass
+        # shape error doesn't surprise us mid-training.
+        vqgan_latent = self.vqgan.out_resolution()
+        if self.transformer.latent_resolution != vqgan_latent:
+            raise ValueError(
+                "VQFontConfig: transformer.latent_resolution must equal "
+                f"vqgan.out_resolution(); got {self.transformer.latent_resolution} "
+                f"vs {vqgan_latent} (vqgan.image_size={self.vqgan.image_size}, "
+                f"channel_mult={self.vqgan.channel_mult})"
+            )
 
 
 class VQFont(nn.Module):

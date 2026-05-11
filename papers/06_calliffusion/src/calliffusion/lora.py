@@ -66,13 +66,27 @@ def apply_lora_to_module(
     module: nn.Module,
     *,
     target_substrings: Iterable[str] = ("to_q", "to_k", "to_v", "to_out"),
+    parent_types: Iterable[type[nn.Module]] | None = None,
     rank: int = 4,
     alpha: float = 8.0,
     dropout: float = 0.0,
 ) -> int:
     """Replace ``nn.Linear`` submodules whose qualified name matches any
     substring with a ``LoraLinear``. Returns the number of layers wrapped.
+
+    If ``parent_types`` is provided, only ``nn.Linear`` modules whose
+    immediate parent is an instance of one of those classes are eligible.
+    This is the recommended way to scope LoRA to cross-attention only —
+    e.g. ``parent_types=(SpatialCrossAttention,)`` avoids accidentally
+    wrapping ``SpatialSelfAttention.to_out`` (which shares the
+    ``to_out`` name).
     """
+    # Materialise to a tuple so we can reuse without re-iterating an
+    # exhausted generator.
+    target_substrings = tuple(target_substrings)
+    parent_types_tuple: tuple[type[nn.Module], ...] = (
+        tuple(parent_types) if parent_types is not None else ()
+    )
     wrapped = 0
     targets: list[tuple[str, nn.Linear]] = []
     for name, sub in module.named_modules():
@@ -80,6 +94,11 @@ def apply_lora_to_module(
             continue
         if not any(t in name for t in target_substrings):
             continue
+        if parent_types_tuple:
+            parent_name, _, _ = name.rpartition(".")
+            parent = module.get_submodule(parent_name) if parent_name else module
+            if not isinstance(parent, parent_types_tuple):
+                continue
         targets.append((name, sub))
     for name, sub in targets:
         parent_name, _, child_name = name.rpartition(".")
