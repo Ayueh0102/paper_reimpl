@@ -1,0 +1,28 @@
+# Stage A v3 — long-run TTF cross-font pretrain.
+#
+# Warm-starts from Stage A v1 (5000 step ckpt) and extends to 80000 steps.
+# Aim: get the model from "recognizable strokes" (v1 quality, 5k step) to
+# "legible cross-font glyphs" (paper-faithful pretrain).
+#
+# Estimated wall time: 80000 / 3.5 steps_per_sec ≈ 22857 sec ≈ 6.35 hours.
+# Run cuda:0 on RTX 6000 Ada; cuda:1 remains free for sampling / 02_hfh.
+seed: 42
+batch_size: 16
+num_workers: 0
+learning_rate: 1.0e-4
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 10000              # synthetic epoch length is 20k, so 10000 epochs cycle plenty
+max_steps: 80000
+log_every: 500                 # 80000 / 500 = 160 log lines
+cfg_drop_prob: 0.1
+scr_weight: 0.0
+scr_embed_dim: 128
+ckpt_dir: papers/01_fontdiffuser/outputs/stage_a_ttf_v3
+
+diffusion:
+  timesteps: 1000
+  beta_start: 1.0e-4
+  beta_end: 2.0e-2
+  beta_schedule: linear
+  prediction_target: epsilon

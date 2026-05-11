@@ -283,6 +283,21 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
     model = build_fontdiffuser(cfg).to(device)
     diffusion = _build_diffusion(train_cfg, device=device)
 
+    # Warm-start from an earlier stage's checkpoint when --init-ckpt is set.
+    # Loads model weights only (no optimizer state) so this works across
+    # different schedules. strict=False keeps it tolerant of mid-development
+    # head additions (e.g. swapping in SCR for Stage B).
+    init_ckpt = getattr(args, "init_ckpt", None)
+    if init_ckpt:
+        print(f"[fontdiffuser] warm-start from --init-ckpt {init_ckpt}")
+        blob = torch.load(init_ckpt, map_location=device, weights_only=False)
+        state = blob["model"] if isinstance(blob, dict) and "model" in blob else blob
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        if missing:
+            print(f"[fontdiffuser] init_ckpt missing {len(missing)} keys: {missing[:5]}...")
+        if unexpected:
+            print(f"[fontdiffuser] init_ckpt unexpected {len(unexpected)} keys: {unexpected[:5]}...")
+
     scr_weight = float(train_cfg.get("scr_weight", 0.0))
     scr_module: SCRModule | None = None
     if scr_weight > 0.0:
