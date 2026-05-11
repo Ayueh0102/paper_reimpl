@@ -1,0 +1,56 @@
+[entrypoint] paper=fontdiffuser backend=lab_server
+[entrypoint] manifest_root=D:\Char\ayueh\paper_reimpl\data_snapshot\splits
+[entrypoint] device=cuda:0 dry_run=False synthetic=False
+[fontdiffuser] device=cuda:0 steps=5000 bs=16 lr=0.0001 scr_weight=0.0 cfg_drop=0.1 timesteps=1000 pred=epsilon schedule=linear
+[fontdiffuser] step=0 loss_total=2.1235 loss_simple=1.1814 loss_perc=94.1339 loss_offset=0.0015 loss_scr=0.0000
+[fontdiffuser] step=100 loss_total=0.5491 loss_simple=0.0473 loss_perc=50.1813 loss_offset=0.0001 loss_scr=0.0000
+[fontdiffuser] step=200 loss_total=0.3144 loss_simple=0.0534 loss_perc=26.0959 loss_offset=0.0001 loss_scr=0.0000
+[fontdiffuser] step=300 loss_total=0.2946 loss_simple=0.0671 loss_perc=22.7505 loss_offset=0.0001 loss_scr=0.0000
+[fontdiffuser] step=400 loss_total=0.2552 loss_simple=0.0322 loss_perc=22.2932 loss_offset=0.0001 loss_scr=0.0000
+[fontdiffuser] step=500 loss_total=0.2365 loss_simple=0.0347 loss_perc=20.1800 loss_offset=0.0001 loss_scr=0.0000
+[fontdiffuser] step=600 loss_total=0.2184 loss_simple=0.0323 loss_perc=18.6026 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=700 loss_total=0.2574 loss_simple=0.0190 loss_perc=23.8437 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=800 loss_total=0.2025 loss_simple=0.0239 loss_perc=17.8594 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=900 loss_total=0.2242 loss_simple=0.0179 loss_perc=20.6339 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=1000 loss_total=0.2810 loss_simple=0.0167 loss_perc=26.4321 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=1100 loss_total=0.2535 loss_simple=0.0191 loss_perc=23.4336 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=1200 loss_total=0.2255 loss_simple=0.0143 loss_perc=21.1112 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=1300 loss_total=0.2570 loss_simple=0.0127 loss_perc=24.4289 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=1400 loss_total=0.2302 loss_simple=0.0166 loss_perc=21.3640 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=1500 loss_total=0.1453 loss_simple=0.0301 loss_perc=11.5157 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=1600 loss_total=0.1669 loss_simple=0.0199 loss_perc=14.6999 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=1700 loss_total=0.1799 loss_simple=0.0195 loss_perc=16.0339 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=1800 loss_total=0.2275 loss_simple=0.0129 loss_perc=21.4646 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=1900 loss_total=0.2143 loss_simple=0.0151 loss_perc=19.9168 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=2000 loss_total=0.1756 loss_simple=0.0184 loss_perc=15.7161 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=2100 loss_total=0.2045 loss_simple=0.0130 loss_perc=19.1495 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=2200 loss_total=0.1763 loss_simple=0.0114 loss_perc=16.4959 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=2300 loss_total=0.2224 loss_simple=0.0156 loss_perc=20.6856 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=2400 loss_total=0.1440 loss_simple=0.0225 loss_perc=12.1502 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=2500 loss_total=0.2885 loss_simple=0.0152 loss_perc=27.3219 loss_offset=0.0001 loss_scr=0.0000
+[fontdiffuser] step=2600 loss_total=0.1956 loss_simple=0.0294 loss_perc=16.6182 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=2700 loss_total=0.2504 loss_simple=0.0111 loss_perc=23.9300 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=2800 loss_total=0.2318 loss_simple=0.0088 loss_perc=22.2954 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=2900 loss_total=0.2213 loss_simple=0.0121 loss_perc=20.9134 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=3000 loss_total=0.1329 loss_simple=0.0223 loss_perc=11.0507 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=3100 loss_total=0.1971 loss_simple=0.0137 loss_perc=18.3290 loss_offset=0.0001 loss_scr=0.0000
+[fontdiffuser] step=3200 loss_total=0.1532 loss_simple=0.0211 loss_perc=13.2048 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=3300 loss_total=0.1525 loss_simple=0.0109 loss_perc=14.1611 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=3400 loss_total=0.1996 loss_simple=0.0100 loss_perc=18.9650 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=3500 loss_total=0.2006 loss_simple=0.0211 loss_perc=17.9539 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=3600 loss_total=0.1663 loss_simple=0.0120 loss_perc=15.4244 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=3700 loss_total=0.1663 loss_simple=0.0139 loss_perc=15.2328 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=3800 loss_total=0.1546 loss_simple=0.0197 loss_perc=13.4878 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=3900 loss_total=0.2189 loss_simple=0.0113 loss_perc=20.7575 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=4000 loss_total=0.1874 loss_simple=0.0125 loss_perc=17.4914 loss_offset=0.0001 loss_scr=0.0000
+[fontdiffuser] step=4100 loss_total=0.1799 loss_simple=0.0122 loss_perc=16.7645 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=4200 loss_total=0.2319 loss_simple=0.0092 loss_perc=22.2695 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=4300 loss_total=0.2173 loss_simple=0.0121 loss_perc=20.5195 loss_offset=0.0001 loss_scr=0.0000
+[fontdiffuser] step=4400 loss_total=0.2062 loss_simple=0.0131 loss_perc=19.3113 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=4500 loss_total=0.2223 loss_simple=0.0131 loss_perc=20.9222 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=4600 loss_total=0.1668 loss_simple=0.0123 loss_perc=15.4544 loss_offset=0.0001 loss_scr=0.0000
+[fontdiffuser] step=4700 loss_total=0.1420 loss_simple=0.0148 loss_perc=12.7199 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] step=4800 loss_total=0.1767 loss_simple=0.0113 loss_perc=16.5295 loss_offset=0.0001 loss_scr=0.0000
+[fontdiffuser] step=4900 loss_total=0.1534 loss_simple=0.0177 loss_perc=13.5725 loss_offset=0.0000 loss_scr=0.0000
+[fontdiffuser] saved checkpoint -> D:\Char\ayueh\paper_reimpl\repo\papers\01_fontdiffuser\outputs\stage_a_ttf_v1\fontdiffuser_last.pt
+[fontdiffuser] done; final_step=5000 dry_run=False

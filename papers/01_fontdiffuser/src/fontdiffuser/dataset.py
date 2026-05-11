@@ -92,11 +92,17 @@ def build_dataset(
         else:
             # ttf_root.parent is the data_snapshot / mother repo data root.
             fonts_root = paths.ttf_root.parent / "fonts_free"
-        cache_path = None
+        # Default: store the char-discovery cache alongside the fonts (one
+        # file per (image_size, font_size_ratio) to avoid stale hits when
+        # rendering parameters change). Lives next to the .ttf data so it
+        # survives across backends without yaml gymnastics.
+        from pathlib import Path as _P
         cache_cfg = data_cfg.get("supported_chars_cache")
+        ratio = float(data_cfg.get("font_size_ratio", 0.85))
         if cache_cfg:
-            from pathlib import Path as _P
             cache_path = _P(str(cache_cfg))
+        else:
+            cache_path = fonts_root / f".ttf_supported_chars_{image_size}px_{ratio}.json"
         return TTFCrossFontPairDataset(
             fonts_root=fonts_root,
             font_ids=data_cfg.get("font_ids"),

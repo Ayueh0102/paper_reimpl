@@ -21,8 +21,11 @@ cjk_end: 0x9FFF
 # if you want a different font set.
 # fonts_root: D:\\Char\\ayueh\\paper_reimpl\\data_snapshot\\fonts_free
 
-# Where to persist the discovered char list. Keeps repeat starts fast.
-supported_chars_cache: papers/01_fontdiffuser/outputs/ttf_supported_chars.json
+# Char discovery cache: when unset, the dataset auto-places it under
+# ``<fonts_root>/.ttf_supported_chars_<size>px_<ratio>.json`` so it lives
+# next to the .ttf data and is discovered consistently across backends.
+# Override here only if you need a separate location.
+# supported_chars_cache: <absolute path>
 
 # script_categories: kai/xing/cao/hei/ming/decor — matches free-font manifest.
 script_categories:
