@@ -1,0 +1,11 @@
+# Stage C — 二南堂 fine-tune (LoRA). 24 writers / 84 units.
+
+manifest: stage_c_ernantang_train.jsonl
+image_size: 128
+content_channels: []
+max_refs: 0
+prompt_dropout_p: 0.05
+synthetic_length: 16
+synthetic_writers: 24
+synthetic_chars: 64
+seed: 2

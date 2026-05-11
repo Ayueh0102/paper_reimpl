@@ -1,0 +1,5 @@
+# Stage B — multi-writer fine-tune on Ernantang manifests.
+source: manifest
+manifest: a_main_clean_smoke_a1.jsonl
+content_channels: [bitmap]
+max_refs: 3

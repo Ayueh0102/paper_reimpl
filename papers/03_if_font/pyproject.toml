@@ -1,12 +1,15 @@
 [project]
 name = "if_font-reimpl"
 version = "0.1.0"
-description = "Blind reimplementation — Phase 1 worker will fill in deps"
+description = "Blind reimplementation of IF-Font (NeurIPS 2024) — IDS + VQ tokens + AR Transformer"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.1",
     "paper-reimpl-shared",
-    # Phase 1 worker: add paper-specific deps here
+    "numpy>=1.26",
+    "pyyaml>=6.0",
+    "pillow>=10.0",
+    "pytest>=8.0",
 ]
 
 [tool.uv.sources]
@@ -16,5 +19,18 @@ paper-reimpl-shared = { path = "../../shared", editable = true }
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[dependency-groups]
+dev = [
+    "ruff>=0.15.12",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/if_font"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = ["E501"]

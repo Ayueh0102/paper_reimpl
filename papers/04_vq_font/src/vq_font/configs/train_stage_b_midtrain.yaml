@@ -1,0 +1,14 @@
+# Stage B — multi-writer Transformer fine-tune on Ernantang.
+stage: transformer
+seed: 42
+batch_size: 32
+num_workers: 2
+learning_rate: 1.0e-4
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 1
+max_steps: 50000
+log_every: 100
+structure_weight: 0.2
+vqgan_ckpt: experiments/04_vq_font/outputs/stage_0_vqgan/vqgan_last.pt
+ckpt_dir: experiments/04_vq_font/outputs/stage_b_transformer

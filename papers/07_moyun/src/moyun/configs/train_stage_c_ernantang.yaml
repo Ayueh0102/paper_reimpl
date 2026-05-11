@@ -1,0 +1,21 @@
+# Stage C — 二南堂 fine-tuning. Strict subset (cv > ins > cal): 24 writers /
+# 84 units / 4659 chars. Smaller lr + smaller cfg_drop to lock style.
+seed: 42
+batch_size: 8
+num_workers: 0
+learning_rate: 2.0e-5
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 1
+max_steps: 20000
+log_every: 100
+cfg_drop_prob: 0.05
+label_dropout_mode: joint
+ckpt_dir: experiments/07_moyun/outputs/stage_c
+
+diffusion:
+  timesteps: 1000
+  beta_start: 1.0e-4
+  beta_end: 2.0e-2
+  beta_schedule: linear
+  prediction_target: epsilon

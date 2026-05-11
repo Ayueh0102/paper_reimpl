@@ -1,0 +1,15 @@
+# Stage A — Transformer pretrain on TTF cross-font pairs.
+#
+# Same synthetic / manifest split as fontdiffuser. R=3 references per sample.
+source: synthetic
+synthetic_length: 64
+max_refs: 3                           # paper-cited 3 reference characters
+content_channels_n: 1
+writer_vocab_size: 13
+style_family_vocab_size: 13
+char_vocab_size: 4659
+script_vocab_size: 4
+seed: 42
+
+manifest: a_main_clean_smoke_a0.jsonl
+content_channels: [bitmap]

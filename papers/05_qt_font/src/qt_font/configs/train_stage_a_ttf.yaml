@@ -1,0 +1,25 @@
+# Stage A training schedule — TTF pretrain for QT-Font.
+#
+# Paper-cited (note 027): AdamW β1=0.9 β2=0.999 wd=0.01 lr=1e-4 cosine;
+# pretrain ~20 epochs ≈ 16k steps; effective batch 1024 via grad accumulation.
+# Single GPU repro uses smaller batch * grad accumulation; we drop both to
+# something fit-able on a 24 GB GPU at depth=4 / 128 px.
+#
+# Discrete diffusion T = 100 is [guessed-because-paper-vague] — D3PM papers
+# typically use 100-200 for image-like discrete tasks.
+seed: 42
+batch_size: 8
+num_workers: 0
+learning_rate: 1.0e-4
+weight_decay: 0.01
+grad_clip: 1.0
+max_epochs: 1
+max_steps: 16000
+log_every: 50
+cfg_drop_prob: 0.1
+ckpt_dir: experiments/05_qt_font/outputs/stage_a
+
+diffusion:
+  timesteps: 100
+  beta_start: 1.0e-4
+  beta_end: 0.02

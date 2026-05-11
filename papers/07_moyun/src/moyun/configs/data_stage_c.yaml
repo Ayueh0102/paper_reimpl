@@ -1,0 +1,6 @@
+# Stage C — 二南堂 fine-tuning. Manifest contains the strict cv > ins > cal
+# subset (24 writers / 84 units / ~4659 chars).
+source: manifest
+manifest: a_main_clean_v1_stage_c.jsonl
+content_channels: [bitmap]
+seed: 42

@@ -1,0 +1,16 @@
+# Stage C — SDS distillation on Ernantang.
+# Paper: 2 epochs SDS distillation, CFG sc=ss=2.0.
+stage: c                # triggers SDS-loss path in train.py
+seed: 2
+batch_size: 8           # [guessed] half of stage A/B for memory
+lr: 2.0e-5              # [guessed] very small lr for distillation
+adam_betas: [0.9, 0.999]
+weight_decay: 0.01
+grad_clip: 1.0
+beta_schedule: linear
+beta_start: 1.0e-4
+beta_end: 2.0e-2
+cfg_dropout: 0.0        # CFG dropout disabled during distillation (teacher carries cond)
+max_steps: 50
+ckpt_dir: outputs/hfh_font/stage_c
+cfg_scale: 2.0          # paper-cited sc=ss=2.0

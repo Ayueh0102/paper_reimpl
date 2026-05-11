@@ -1,0 +1,14 @@
+# Stage A — TTF pretrain. Prompts are "<char> 楷書 <font_name>" built from the
+# manifest's writer field (set to font name) and char field. content_channels is
+# empty because Calliffusion has no content-cache input — the prompt is the only
+# conditioning signal.
+
+manifest: stage_a_ttf_train.jsonl
+image_size: 64
+content_channels: []
+max_refs: 0
+prompt_dropout_p: 0.1
+synthetic_length: 16
+synthetic_writers: 13      # 13 TTF fonts
+synthetic_chars: 64
+seed: 0

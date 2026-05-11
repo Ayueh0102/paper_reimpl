@@ -1,12 +1,19 @@
 [project]
-name = "qt_font-reimpl"
+name = "qt-font-reimpl"
 version = "0.1.0"
-description = "Blind reimplementation — Phase 1 worker will fill in deps"
+description = "Blind reimplementation of QT-Font (SIGGRAPH 2024) — Phase 1"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.1",
+    "numpy>=1.24",
+    "pyyaml>=6.0",
     "paper-reimpl-shared",
-    # Phase 1 worker: add paper-specific deps here
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "ruff>=0.4",
 ]
 
 [tool.uv.sources]
@@ -16,5 +23,19 @@ paper-reimpl-shared = { path = "../../shared", editable = true }
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "ruff>=0.15.12",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/qt_font"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501", "B008"]

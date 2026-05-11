@@ -1,0 +1,5 @@
+# Stage B — multi-writer mid-training on real Ernantang manifests.
+source: manifest
+manifest: a_main_clean_v1.jsonl         # to be filled with the actual smoke manifest name
+content_channels: [bitmap]
+seed: 42

@@ -1,0 +1,16 @@
+# Stage C — Ernantang finetune.
+#
+# Same data shape as Stage B, but the manifest now targets the strict
+# `cv > ins > cal` subset (24 writers / 84 units).
+source: synthetic               # promote to `manifest` for real training
+synthetic_length: 128
+max_refs: 1
+writer_vocab_size: 24
+style_family_vocab_size: 32
+char_vocab_size: 4659
+script_vocab_size: 4
+seed: 42
+
+manifest: a_main_clean_c_ernantang.jsonl
+content_channels: [bitmap]
+ids_lookup_path: ~/Char/datasets/ids/scripts/lookup_ids.py

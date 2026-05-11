@@ -1,0 +1,17 @@
+# Stage A — TTF pretraining for QT-Font (blind reimpl).
+#
+# Paper's "training" subsection in note 027 says: pretrain across multi-font
+# corpus, then few-shot fine-tune; pretrain batch=1024 via gradient
+# accumulation. We follow that intent. Stage A uses synthetic glyph proxies
+# for smoke / dry-run; real Stage A consumes a manifest of TTF-rendered pairs.
+source: synthetic                     # synthetic | manifest
+synthetic_length: 64
+max_refs: 1
+writer_vocab_size: 13                 # placeholder = # of TTF fonts
+char_vocab_size: 256
+script_vocab_size: 4
+seed: 42
+
+# When promoted to real manifests, populate these instead and set source: manifest.
+manifest: a_main_clean_smoke_a0.jsonl
+content_channels: [bitmap]

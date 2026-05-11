@@ -1,0 +1,25 @@
+# QT-Font model architecture (blind reimplementation).
+#
+# Defaults aim at a 128 px target glyph and a depth-4 saturated quadtree
+# (leaf grid 16 × 16, 256 leaves per sample, n_states=8 categorical bins).
+# Numbers marked [guessed-...] in reports/blind_impl.md.
+model:
+  image_size: 128
+  in_channels: 1                # grayscale glyph
+  content_channels: 1           # 1 ch in Stage A (bitmap); up to 6 in Stage B/C
+  ref_channels: 1               # reference glyph channel count
+
+  # Quadtree geometry.
+  depth: 4                      # 4^4 = 256 leaves on a 16×16 grid
+  n_states: 8                   # categorical bins per leaf (~3-bit intensity)
+
+  # Backbone widths.
+  hidden_dim: 128
+  n_layers: 3                   # number of GraphConv layers per (fine, coarse) stack
+  time_embed_dim: 128
+  style_embed_dim: 128
+  content_embed_dim: 128
+
+  dropout: 0.0
+  ref_dropout: 0.1              # CFG-style ref drop at train time
+  timesteps: 100                # discrete diffusion T (paper: unspecified)

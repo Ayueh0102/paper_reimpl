@@ -1,0 +1,5 @@
+# Stage C — Ernantang target style fine-tune.
+source: manifest
+manifest: a_main_clean_smoke_a2.jsonl
+content_channels: [bitmap, skeleton]
+max_refs: 0

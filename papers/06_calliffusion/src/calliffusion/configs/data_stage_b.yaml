@@ -1,0 +1,11 @@
+# Stage B — multi-writer mid-train on the broader calligraphy corpus.
+
+manifest: stage_b_calligraphy_train.jsonl
+image_size: 128
+content_channels: []
+max_refs: 0
+prompt_dropout_p: 0.1
+synthetic_length: 24
+synthetic_writers: 24
+synthetic_chars: 128
+seed: 1

@@ -1,0 +1,32 @@
+# VQ-Font model architecture (blind reimplementation).
+#
+# Two sub-configs: `vqgan` (Stage 0 codebook) and `transformer` (Stage 1+
+# token-prior refinement). Defaults follow paper-cited values where available:
+#   * vqgan.num_embeddings = 1024 (paper)
+#   * vqgan latent grid 16x16 (paper) — achieved by 3 channel-mult stages.
+#   * transformer.num_heads = 8 (paper)
+#   * transformer.num_refs = 3 (paper)
+# Other numbers (depths, base_channels, embed_dim) are [guessed-because-paper-vague]
+# — see reports/blind_impl.md.
+vqgan:
+  image_size: 128
+  in_channels: 1
+  base_channels: 64
+  channel_mult: [1, 1, 2, 4]         # 4 stages -> 8x downsample (128 -> 16x16)
+  z_channels: 256
+  embed_dim: 256
+  num_embeddings: 1024               # paper-cited codebook size
+  commitment_weight: 0.25            # VQ-VAE standard β
+  num_res_blocks: 2
+  dropout: 0.0
+
+transformer:
+  latent_resolution: 16
+  embed_dim: 256
+  num_blocks: 6
+  num_heads: 8                       # paper-cited
+  mlp_ratio: 4.0
+  dropout: 0.0
+  num_refs: 3                        # paper-cited reference count
+  codebook_size: 1024                # mirrors vqgan.num_embeddings
+  num_structures: 14                 # 12 chinese structures + atomic + unknown

@@ -1,0 +1,37 @@
+# Stage A training — TTF pretrain.
+#
+# Schedule choices [guessed-because-paper-vague]:
+#   * T=1000 (DDPM default; paper says "DDPM" but does not pin T)
+#   * cosine β schedule (Improved-DDPM default, better at small resolutions
+#     like 80 px) — paper notes do not specify; cosine is the safer choice
+#     at this size [guessed-extension].
+#   * epsilon prediction (DDPM default)
+#   * batch_size 16 for a single 3090; paper hints at single-GPU budget.
+#   * cfg_drop_prob 0.1 — per-attribute null replacement.
+#   * pinn_weight 0.0 in Stage A — keep Stage A as a clean denoiser warm-up.
+#     PINN is activated in Stage B once the model has a competent backbone.
+seed: 42
+batch_size: 16
+num_workers: 2
+learning_rate: 1.0e-4
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 1
+max_steps: 5000
+log_every: 50
+cfg_drop_prob: 0.1
+pinn_weight: 0.0
+pinn_weights:
+  weight_diffusion: 1.0
+  weight_nib: 1.0
+  weight_continuity: 1.0
+  nu: 1.0
+skeleton_channel_index: null            # no skeleton in Stage A content
+ckpt_dir: experiments/08_dp_font/outputs/stage_a
+
+diffusion:
+  timesteps: 1000
+  beta_start: 1.0e-4
+  beta_end: 2.0e-2
+  beta_schedule: cosine
+  prediction_target: epsilon

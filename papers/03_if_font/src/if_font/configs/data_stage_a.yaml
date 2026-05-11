@@ -1,0 +1,20 @@
+# Stage A — VQ tokenizer pretraining on TTF renders.
+#
+# IF-Font requires a pre-trained VQGAN codebook before the AR Transformer
+# can be trained meaningfully (paper "VQGAN, pre-trained, codebook=256").
+# Stage A's job is exactly this codebook pretrain. We do not use IDS at this
+# stage — Stage A trains VQ encoder/decoder + codebook on plain
+# reconstruction.
+source: synthetic               # synthetic | manifest
+synthetic_length: 64
+max_refs: 0                     # no refs during VQ pretrain
+writer_vocab_size: 13           # placeholder = number of TTF fonts
+style_family_vocab_size: 13
+char_vocab_size: 64
+script_vocab_size: 4
+seed: 42
+
+# Promote to real manifests by switching source -> manifest and populating:
+manifest: a_main_clean_smoke_a0.jsonl
+content_channels: [bitmap]
+ids_lookup_path: ~/Char/datasets/ids/scripts/lookup_ids.py

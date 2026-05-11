@@ -1,0 +1,31 @@
+# Stage A — TTF pretraining.
+#
+# Numbers tagged [paper] are from paper §3.5 / Table 1; rest are
+# [guessed-because-paper-vague].
+#   - timesteps=1000 [guessed] DDPM default; paper doesn't pin T.
+#   - β linear 1e-4 -> 2e-2 [guessed] DDPM default.
+#   - prediction_target='epsilon' [guessed] DDPM default.
+#   - lr=1e-4 [paper] §3.5.
+#   - global batch 768 across 3 GPUs in paper [paper §3.5]; we scale to 16
+#     for single-GPU 24 GB (and 2 for the CPU smoke).
+#   - cfg_drop_prob=0.1 [guessed] Ho & Salimans 2022 standard.
+#   - label_dropout_mode='joint' [guessed] standard CFG recipe.
+seed: 42
+batch_size: 16
+num_workers: 0
+learning_rate: 1.0e-4
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 1
+max_steps: 5000
+log_every: 50
+cfg_drop_prob: 0.1
+label_dropout_mode: joint               # joint | independent
+ckpt_dir: experiments/07_moyun/outputs/stage_a
+
+diffusion:
+  timesteps: 1000
+  beta_start: 1.0e-4
+  beta_end: 2.0e-2
+  beta_schedule: linear
+  prediction_target: epsilon

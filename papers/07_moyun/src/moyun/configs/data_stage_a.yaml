@@ -1,0 +1,16 @@
+# Stage A — TTF pretraining (synthetic for smoke / dry-run).
+#
+# In production Stage A you'd swap to a manifest of TTF-rendered glyphs across
+# the 13 fonts to teach the model the basic char shape, then move to multi-
+# writer real data in Stage B. For the smoke/dry-run path we keep synthetic.
+source: synthetic                       # synthetic | manifest
+synthetic_length: 64
+content_channels: 1                     # Moyun ignores content; keep small
+writer_vocab_size: 13                   # placeholder = # of TTF fonts
+style_family_vocab_size: 13
+char_vocab_size: 64
+script_vocab_size: 4
+seed: 42
+
+# When promoted to real manifests:
+manifest: a_main_clean_smoke_a0.jsonl

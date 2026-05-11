@@ -1,0 +1,24 @@
+# Stage A training schedule — VQ codebook pretrain on TTF renders.
+#
+# In Stage A we only train the VQ tokenizer (encoder + codebook + decoder),
+# so ce_weight = 0 disables the AR cross-entropy.
+# - timesteps n/a (IF-Font is AR, not diffusion)
+# - paper-cited training: batch 128, 15 epochs, AdamW + cosine. Here we
+#   keep batch_size 16 + grad_accum-style scaling, easy to bump on real GPUs.
+seed: 42
+batch_size: 16
+num_workers: 0
+learning_rate: 1.0e-4
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 1
+max_steps: 5000
+log_every: 50
+cfg_drop_prob: 0.0              # CFG drop unused in Stage A (no IDS use yet)
+
+# Loss weights — Stage A: VQ + recon, no AR yet.
+ce_weight: 0.0
+vq_weight: 1.0
+recon_weight: 1.0
+
+ckpt_dir: experiments/03_if_font/outputs/stage_a

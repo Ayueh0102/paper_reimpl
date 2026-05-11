@@ -1,12 +1,21 @@
 [project]
 name = "hfh_font-reimpl"
 version = "0.1.0"
-description = "Blind reimplementation — Phase 1 worker will fill in deps"
+description = "Blind Phase-1 reimplementation of HFH-Font (SIGGRAPH-Asia 2024)"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.1",
     "paper-reimpl-shared",
-    # Phase 1 worker: add paper-specific deps here
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+    "pillow>=10.0",
+    "einops>=0.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
 ]
 
 [tool.uv.sources]
@@ -18,3 +27,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hfh_font"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]

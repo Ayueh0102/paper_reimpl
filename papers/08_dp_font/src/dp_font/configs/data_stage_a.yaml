@@ -1,0 +1,18 @@
+# Stage A — TTF pretraining.
+#
+# DP-Font's paper trains on Liu Gongquan / Yan Zhenqing scans directly, but
+# our 8-paper repro pipeline pretrains on TTF cross-font pairs first to
+# share Stage A across papers. Stage A uses synthetic glyphs for the smoke
+# / dry-run path; real Stage A consumes a manifest of TTF-rendered pairs.
+source: synthetic
+synthetic_length: 64
+max_refs: 0                            # DP-Font has no reference-image path
+writer_vocab_size: 13                  # placeholder = # of TTF fonts
+style_family_vocab_size: 13
+char_vocab_size: 64
+script_vocab_size: 4
+seed: 42
+
+# When promoted to real manifests, populate these instead and set source: manifest:
+manifest: a_main_clean_smoke_a0.jsonl
+content_channels: [bitmap]

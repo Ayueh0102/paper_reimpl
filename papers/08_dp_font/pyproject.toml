@@ -1,12 +1,15 @@
 [project]
 name = "dp_font-reimpl"
 version = "0.1.0"
-description = "Blind reimplementation — Phase 1 worker will fill in deps"
+description = "Blind reimplementation of DP-Font (IJCAI 2024 AAC Track) — DDPM + PINN + multi-attribute guidance + stroke-order constraint"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.1",
     "paper-reimpl-shared",
-    # Phase 1 worker: add paper-specific deps here
+    "numpy>=1.26",
+    "pyyaml>=6.0",
+    "pillow>=10.0",
+    "pytest>=8.0",
 ]
 
 [tool.uv.sources]
@@ -15,6 +18,11 @@ paper-reimpl-shared = { path = "../../shared", editable = true }
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.12",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dp_font"]

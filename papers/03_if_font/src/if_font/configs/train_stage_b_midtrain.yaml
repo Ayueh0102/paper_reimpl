@@ -1,0 +1,24 @@
+# Stage B — AR Transformer training over (IDS, refs) → target tokens.
+#
+# Paper-cited training (note "訓練配置"):
+#   batch_size = 128, 15 epochs, AdamW + warmup + cosine, 1× V100 16 GB.
+# We reproduce that with the same optimiser setup. Here we keep batch_size
+# moderate so it fits a single mid-range GPU; users scale up.
+seed: 42
+batch_size: 32
+num_workers: 0
+learning_rate: 2.0e-4
+weight_decay: 0.05
+grad_clip: 1.0
+max_epochs: 1
+max_steps: 50000
+log_every: 100
+cfg_drop_prob: 0.1              # classifier-free guidance training
+
+# Stage B focuses on AR; VQ should be (mostly) frozen — keep a small VQ
+# weight in case codebook usage drifts.
+ce_weight: 1.0
+vq_weight: 0.0
+recon_weight: 0.0
+
+ckpt_dir: experiments/03_if_font/outputs/stage_b

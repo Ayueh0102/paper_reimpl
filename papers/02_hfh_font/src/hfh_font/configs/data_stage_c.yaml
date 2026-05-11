@@ -1,0 +1,11 @@
+# Stage C — SDS distillation on Ernantang. Same manifest as B by default.
+image_size: 128
+n_refs: 4
+content_channels: [bitmap, sdf, skeleton]
+manifest: ernantang_train.jsonl
+synthetic_length: 32
+synthetic_writer_vocab: 24
+synthetic_style_vocab: 32
+synthetic_char_vocab: 4096
+synthetic_script_vocab: 4
+synthetic_seed: 20260513

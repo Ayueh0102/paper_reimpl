@@ -1,0 +1,25 @@
+# HFH-Font blind reimpl — model config.
+# Numbers tagged [paper] cite the project paper note 021_HFH-Font...md;
+# all others are [guessed] defaults documented in reports/blind_impl.md.
+
+image_size: 128            # [guessed] smoke / dry-run resolution; paper renders are 1024 final / 512 LR
+in_channels: 1             # grayscale glyphs
+content_channels: 3        # bitmap + sdf + skeleton (project-wide convention)
+latent_channels: 4         # [guessed] SD-1.5-style latent width
+vae_down_factor: 8         # [paper] §訓練配置: 64×64 latent → 512px image
+base_channels: 64          # [guessed] smaller than SD-1.5 (320) for single-GPU
+channel_mult: [1, 2, 4]    # [guessed] 3-level U-Net depth
+num_res_blocks: 2          # [guessed]
+attention_resolutions: [4, 2]  # [guessed] cross-attention at middle resolutions
+d_ctx: 256                 # [guessed] context channel for AdaLN + cross-attn KV
+n_heads: 4                 # [guessed]
+char_vocab_size: 4096      # ≥ 二南堂 4659 will need bump; safe default
+writer_vocab_size: 32      # ≥ 24 二南堂 writers
+script_vocab_size: 5       # 楷/行/草/隸/篆
+n_refs: 4                  # [guessed] paper supports variable; 4 is the project-wide default
+components_per_ref: 4      # adaptive-pool to 2×2 grid; [guessed]
+dropout: 0.1               # [guessed]
+diffusion_timesteps: 1000  # [guessed] DDPM training horizon
+diffusion_target: x0       # project Plan-A convention
+sr_enabled: false          # SR module deferred to dedicated stage
+sr_scale: 2

@@ -1,0 +1,11 @@
+# Stage A — TTF pretrain. Synthetic-only by default (no Ernantang TTF manifest yet).
+image_size: 128
+n_refs: 4
+content_channels: [bitmap, sdf, skeleton]
+manifest: null                       # null → must use --synthetic for dry-run
+synthetic_length: 16
+synthetic_writer_vocab: 13           # 13 TTF fonts in mother repo
+synthetic_style_vocab: 13
+synthetic_char_vocab: 256
+synthetic_script_vocab: 4
+synthetic_seed: 20260511

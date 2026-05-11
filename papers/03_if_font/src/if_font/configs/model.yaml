@@ -1,0 +1,40 @@
+# IF-Font model architecture (blind reimplementation).
+#
+# Paper-cited values (NeurIPS 2024 §"訓練配置"):
+#   * VQGAN codebook size = 256, downsample factor = 8
+#   * Transformer decoder: 10 blocks, 8 heads, dim = 384
+#   * 2 self-attn + 1 cross-attn per block
+# Paper-vague values (see reports/blind_impl.md):
+#   * VQ encoder channel ladder
+#   * IDS encoder depth/width
+model:
+  image_size: 128
+  in_channels: 1                # grayscale glyph
+
+  # VQ tokenizer (Stage A pre-pretrain target)
+  vq:
+    base_channels: 64
+    # 4 stages -> 3 downsamples -> factor 8 (paper-cited 8).
+    channel_mult: [1, 2, 2, 4]
+    embedding_dim: 256
+    codebook_size: 256          # paper-cited
+    commitment_weight: 0.25
+    decay: 0.99
+
+  # IDS text encoder
+  ids_vocab_size: 8192          # upper bound; runtime trims to fitted vocab
+  ids_max_len: 32
+  ids_encoder_layers: 2
+  ids_encoder_heads: 4
+  ids_encoder_dim: 384
+
+  # AR Transformer decoder (paper-cited 10 blocks, 8 heads, 384 dim)
+  d_model: 384
+  n_heads: 8
+  n_blocks: 10
+  n_self_attn_per_block: 2      # paper-cited 2 self-attn + 1 cross-attn
+  ffn_mult: 4
+  dropout: 0.0
+
+  # Reference handling
+  n_refs: 1                     # one-shot setup

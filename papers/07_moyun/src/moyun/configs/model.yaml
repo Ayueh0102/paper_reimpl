@@ -1,0 +1,28 @@
+# Moyun model architecture (blind reimplementation).
+#
+# Paper §3.3-3.4 pins:
+#   patch_size=8, hidden_dim=512, num_blocks=4 (N=4)
+#   VAE latent input is 32x32x4 → sequence length L = (32/8)^2 = 16 tokens.
+#
+# Vocab sizes default to Ernantang fine-tune scale (Stage C).
+# For Mobao-scale pretraining (paper) the writer/char vocab would be much
+# larger; we keep this small to fit a single 24 GB GPU.
+model:
+  image_size: 32                       # VAE latent side (paper)
+  in_channels: 4                       # 4-ch VAE latent (paper)
+  patch_size: 8                        # paper §3.3
+  hidden_dim: 512                      # paper §3.3
+  num_blocks: 4                        # paper §3.3 N=4
+  d_state: 16                          # [guessed-because-paper-vague] Mamba1 default
+  d_conv: 3                            # [guessed-because-paper-vague] Mamba1 default
+  mlp_ratio: 4.0                       # [guessed-because-paper-vague] DiT default
+  bidirectional: true                  # [guessed-because-paper-vague] Vision Mamba (Zhu et al.) default
+
+  # TripleLabel vocab sizes (Stage C: 二南堂 / Ernantang).
+  writer_vocab: 24                     # Ernantang writers
+  script_vocab: 5                      # 楷/行/草/隸/篆 ; one slot reserved for [UNK]
+  char_vocab: 4659                     # Ernantang unique chars
+
+  # Conditioning MLP / time embed widths: None -> hidden_dim.
+  cond_mlp_dim: null
+  time_embed_dim: null

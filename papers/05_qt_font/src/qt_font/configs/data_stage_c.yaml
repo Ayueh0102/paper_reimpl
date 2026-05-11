@@ -1,0 +1,15 @@
+# Stage C — Ernantang few-shot fine-tuning.
+#
+# Paper says fine-tuning uses small batch with target-font glyphs only. We
+# down-shift batch and route through the same SyntheticDataset until manifest
+# plumbing lands in Phase 2.
+source: synthetic
+synthetic_length: 64
+max_refs: 4
+writer_vocab_size: 24
+char_vocab_size: 4659
+script_vocab_size: 5
+seed: 2048
+
+manifest: c_ernantang_finetune.jsonl
+content_channels: [bitmap, sdf, skeleton]

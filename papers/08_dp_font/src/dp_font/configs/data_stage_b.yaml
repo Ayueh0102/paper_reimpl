@@ -1,0 +1,9 @@
+# Stage B — multi-writer Ernantang mid-train.
+#
+# Real manifests resolve via the shared backend (paper_reimpl_shared.data.manifest).
+# Smoke manifest used as default so dry-run does not require the full
+# manifest snapshot.
+source: manifest
+manifest: a_main_clean_smoke_a1.jsonl
+content_channels: [bitmap, skeleton]   # PINN nib-motion reads skeleton
+max_refs: 0

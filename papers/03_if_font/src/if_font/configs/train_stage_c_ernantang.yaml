@@ -1,0 +1,19 @@
+# Stage C — Ernantang finetune (strict cv > ins > cal subset).
+#
+# Same recipe as Stage B but on the Ernantang-only manifest, lower lr.
+seed: 42
+batch_size: 16
+num_workers: 0
+learning_rate: 5.0e-5
+weight_decay: 0.05
+grad_clip: 1.0
+max_epochs: 1
+max_steps: 30000
+log_every: 100
+cfg_drop_prob: 0.1
+
+ce_weight: 1.0
+vq_weight: 0.0
+recon_weight: 0.0
+
+ckpt_dir: experiments/03_if_font/outputs/stage_c

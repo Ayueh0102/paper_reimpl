@@ -1,0 +1,16 @@
+# Stage B — multi-writer AR training.
+#
+# VQ is now loaded from Stage A. AR transformer learns to predict target
+# tokens conditioned on (IDS, refs).
+source: synthetic               # promote to `manifest` for real training
+synthetic_length: 128
+max_refs: 1                     # one-shot setup
+writer_vocab_size: 24           # Ernantang baseline
+style_family_vocab_size: 32
+char_vocab_size: 4659
+script_vocab_size: 4
+seed: 42
+
+manifest: a_main_clean_b_midtrain.jsonl
+content_channels: [bitmap]
+ids_lookup_path: ~/Char/datasets/ids/scripts/lookup_ids.py

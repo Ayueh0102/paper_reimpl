@@ -1,12 +1,28 @@
 [project]
 name = "calliffusion-reimpl"
 version = "0.1.0"
-description = "Blind reimplementation — Phase 1 worker will fill in deps"
+description = "Phase 1 blind reimplementation of Calliffusion (Liao 2023, arXiv 2305.19124)"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.1",
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+    "pillow>=10.0",
+    "einops>=0.7",
     "paper-reimpl-shared",
-    # Phase 1 worker: add paper-specific deps here
+    # BERT + LoRA stack. transformers brings tokenizers; safetensors is a
+    # transitive that we pin loosely. peft is included as a soft dep so the
+    # production LoRA path can use it; tests use our minimal in-house wrapper
+    # in src/calliffusion/lora.py to avoid network downloads.
+    "transformers>=4.40",
+    "tokenizers>=0.15",
+    "peft>=0.11",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
 ]
 
 [tool.uv.sources]
@@ -18,3 +34,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/calliffusion"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]

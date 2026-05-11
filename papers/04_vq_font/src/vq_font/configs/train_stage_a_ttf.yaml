@@ -1,0 +1,23 @@
+# Stage A — Token Prior Refinement Transformer pretrain (paper Stage 2).
+#
+# Paper-cited:
+#   - 300,000 iterations on 1x A6000
+#   - Adam, lr 2e-4
+#   - batch_size 32
+#   - num_heads 8, num_refs 3
+# SSEM structure weight + transformer depth are [guessed-because-paper-vague].
+stage: transformer
+seed: 42
+batch_size: 32
+num_workers: 2
+learning_rate: 2.0e-4
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 1
+max_steps: 300000                     # paper-cited 300k iters
+log_every: 100
+structure_weight: 0.1
+# vqgan_ckpt is the Stage-0 checkpoint path (relative to repo root). When
+# missing or non-existent we fall back to random VQGAN init — fine for dry-run.
+vqgan_ckpt: experiments/04_vq_font/outputs/stage_0_vqgan/vqgan_last.pt
+ckpt_dir: experiments/04_vq_font/outputs/stage_a_transformer

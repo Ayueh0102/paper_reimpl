@@ -1,0 +1,21 @@
+# Stage 0 — VQGAN font codebook pretrain.
+#
+# Paper-cited:
+#   - 200,000 iterations on 1x A6000
+#   - Adam, lr 4e-5
+#   - batch_size 32
+#   - codebook size 1024
+# Other numbers are [guessed-because-paper-vague]; see reports/blind_impl.md.
+stage: vqgan
+seed: 42
+batch_size: 32
+num_workers: 2
+learning_rate: 4.0e-5
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 1
+max_steps: 200000                     # paper-cited 200k iters
+log_every: 100
+recon_weight: 1.0
+vq_weight: 1.0
+ckpt_dir: experiments/04_vq_font/outputs/stage_0_vqgan

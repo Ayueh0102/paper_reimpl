@@ -1,0 +1,28 @@
+# DP-Font model architecture (blind reimplementation).
+#
+# Defaults track the paper note: 80x80 input, single GeForce RTX 3090
+# budget, DDPM U-Net trunk with multi-attribute guidance + stroke-order
+# constraint. Channel widths / attn placement are [guessed-because-paper-vague];
+# see reports/blind_impl.md.
+model:
+  image_size: 80                       # paper says "80x80 input"
+  in_channels: 1                       # grayscale glyph
+  content_channels: 1                  # bitmap only at Stage A; rises at B/C
+  base_channels: 64
+  channel_mult: [1, 2, 2, 4]           # 4 stages -> [80, 40, 20, 10]
+  attn_resolutions: [10]               # self-attn at the 10x10 bottleneck-adjacent stage
+  num_res_blocks: 2
+  time_embed_dim: 256
+  cond_embed_dim: 256                  # multi-attribute guidance vector width
+  num_heads: 4
+  dropout: 0.0
+
+  # Multi-attribute vocab sizes (training script may override after reading
+  # dataset metadata).
+  writer_vocab_size: 32                # placeholder upper bound (Ernantang has ~24)
+  script_vocab_size: 4                 # 楷/行/草/小篆
+  char_vocab_size: 5000                # 4659 unique chars + slack
+  stroke_vocab_size: 36                # public DB inventory; +null in model
+  stroke_seq_len: 32                   # max strokes per char we support
+  use_ink_intensity: true
+  use_font_size: true

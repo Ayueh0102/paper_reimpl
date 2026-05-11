@@ -1,0 +1,27 @@
+# Stage B — Ernantang multi-writer mid-train.
+# Activates PINN. Skeleton channel is at content index 1 (see data_stage_b.yaml).
+seed: 42
+batch_size: 16
+num_workers: 2
+learning_rate: 5.0e-5
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 1
+max_steps: 20000
+log_every: 100
+cfg_drop_prob: 0.1
+pinn_weight: 0.05                       # [guessed] modest weight to avoid PINN dominating
+pinn_weights:
+  weight_diffusion: 1.0
+  weight_nib: 1.0
+  weight_continuity: 0.5                # [guessed] continuity is the noisiest term
+  nu: 1.0
+skeleton_channel_index: 1               # 0=bitmap, 1=skeleton in data_stage_b
+ckpt_dir: experiments/08_dp_font/outputs/stage_b
+
+diffusion:
+  timesteps: 1000
+  beta_start: 1.0e-4
+  beta_end: 2.0e-2
+  beta_schedule: cosine
+  prediction_target: epsilon

@@ -1,0 +1,19 @@
+# Stage 0 — VQGAN font codebook pretrain.
+#
+# Paper trains on a "large multi-font corpus" of high-quality glyphs to
+# capture serif / brush / artistic prior. Phase 1 reimpl wires Ernantang +
+# TTF renders manifests as the actual source; the smoke / dry-run path
+# substitutes a synthetic dataset.
+source: synthetic                     # synthetic | manifest
+synthetic_length: 64
+max_refs: 0                           # Stage 0 does not need references
+content_channels_n: 1
+writer_vocab_size: 13
+style_family_vocab_size: 13
+char_vocab_size: 4659
+script_vocab_size: 4
+seed: 42
+
+# Real-data alternative (set source: manifest):
+manifest: a_main_clean_smoke_a0.jsonl
+content_channels: [bitmap]

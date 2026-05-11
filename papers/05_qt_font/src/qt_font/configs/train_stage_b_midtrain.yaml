@@ -1,0 +1,21 @@
+# Stage B — multi-writer mid-train on Ernantang's 24 writers.
+#
+# Smaller batch than Stage A, fewer total steps. cfg_drop_prob lowered to 0.05
+# (encourages slightly less unconditional reliance now that we condition on
+# real writer ids).
+seed: 1024
+batch_size: 8
+num_workers: 0
+learning_rate: 5.0e-5
+weight_decay: 0.01
+grad_clip: 1.0
+max_epochs: 5
+max_steps: 6000
+log_every: 50
+cfg_drop_prob: 0.05
+ckpt_dir: experiments/05_qt_font/outputs/stage_b
+
+diffusion:
+  timesteps: 100
+  beta_start: 1.0e-4
+  beta_end: 0.02

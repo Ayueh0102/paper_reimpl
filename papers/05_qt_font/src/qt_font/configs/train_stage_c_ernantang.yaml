@@ -1,0 +1,19 @@
+# Stage C — Ernantang few-shot fine-tune.
+#
+# Paper-cited fine-tune batch = 8 (note 027). lr stepped down 10×.
+seed: 2048
+batch_size: 8
+num_workers: 0
+learning_rate: 1.0e-5
+weight_decay: 0.01
+grad_clip: 1.0
+max_epochs: 50
+max_steps: 1500
+log_every: 25
+cfg_drop_prob: 0.0
+ckpt_dir: experiments/05_qt_font/outputs/stage_c
+
+diffusion:
+  timesteps: 100
+  beta_start: 1.0e-4
+  beta_end: 0.02

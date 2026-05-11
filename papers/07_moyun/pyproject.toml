@@ -1,12 +1,30 @@
 [project]
 name = "moyun-reimpl"
 version = "0.1.0"
-description = "Blind reimplementation — Phase 1 worker will fill in deps"
+description = "Blind reimplementation of Moyun (Vision Mamba + TripleLabel diffusion calligraphy generation, ACM McGE Workshop 2025)"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.1",
     "paper-reimpl-shared",
-    # Phase 1 worker: add paper-specific deps here
+    "numpy>=1.26",
+    "pyyaml>=6.0",
+    "pillow>=10.0",
+    "pytest>=8.0",
+    # NOTE on Mamba: the paper specifies "Vision Mamba (Mamba2)" as backbone.
+    # The reference Mamba CUDA kernel (``mamba-ssm`` package) requires a
+    # working nvcc / Triton toolchain and reliably FAILS to build on:
+    #   - macOS (no CUDA at all)
+    #   - Windows (mamba-ssm wheels are sparse; building from source needs MSVC + CUDA)
+    # Therefore we ship a *pure-PyTorch Selective Scan SSM* in
+    # ``src/moyun/mamba_block.py``. It is the recurrence form of Mamba1 (S6)
+    # implemented as a sequential scan: O(L) per layer, no Triton, runs on any
+    # device including CPU. This is slower than the official kernel but correct
+    # by construction and adequate for smoke + Stage A/B/C on a single 24 GB
+    # GPU at the Ernantang scale (24 calligraphers, 4659 chars).
+    #
+    # If a fast CUDA path is needed later, add ``mamba-ssm`` here and switch
+    # the import in ``mamba_block.py`` — the interface is intentionally a thin
+    # wrapper so the swap is one ``if`` branch.
 ]
 
 [tool.uv.sources]
@@ -16,5 +34,13 @@ paper-reimpl-shared = { path = "../../shared", editable = true }
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[dependency-groups]
+dev = [
+    "ruff>=0.15.12",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/moyun"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

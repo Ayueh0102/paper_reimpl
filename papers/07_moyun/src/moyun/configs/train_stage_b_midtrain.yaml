@@ -1,0 +1,21 @@
+# Stage B — multi-writer mid-training on Ernantang. Reuses the Mamba+
+# TripleLabel from Stage A; warm-starts from stage_a/moyun_last.pt.
+seed: 42
+batch_size: 16
+num_workers: 0
+learning_rate: 5.0e-5                   # halved for fine-tune
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 1
+max_steps: 30000
+log_every: 100
+cfg_drop_prob: 0.1
+label_dropout_mode: joint
+ckpt_dir: experiments/07_moyun/outputs/stage_b
+
+diffusion:
+  timesteps: 1000
+  beta_start: 1.0e-4
+  beta_end: 2.0e-2
+  beta_schedule: linear
+  prediction_target: epsilon
