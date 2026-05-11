@@ -219,7 +219,9 @@ def main(
     ckpt_dir_raw = train_cfg.get("ckpt_dir", "outputs/hfh_font/default")
     ckpt_dir = Path(ckpt_dir_raw)
     if not ckpt_dir.is_absolute():
-        repo_root = Path(__file__).resolve().parents[3]
+        # parents: [0]=hfh_font [1]=src [2]=02_hfh_font [3]=papers [4]=repo
+        # root. yaml ckpt_dir is repo-root-relative, so use parents[4].
+        repo_root = Path(__file__).resolve().parents[4]
         ckpt_dir = repo_root / ckpt_dir
     if not args.dry_run:
         ckpt_dir.mkdir(parents=True, exist_ok=True)
