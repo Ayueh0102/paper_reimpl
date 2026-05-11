@@ -1,0 +1,35 @@
+# Stage A — real TTF cross-font pretrain for 02 (HFH-Font).
+#
+# Uses the shared TTFCrossFontPairDataset (same one 01 uses). HFH's
+# content_channels is multi-channel ([bitmap, sdf, skeleton]) but the
+# TTF renderer only produces bitmap, so dataset.py broadcasts the
+# bitmap to len(content_channels) channels.
+image_size: 128
+n_refs: 4                              # HFH is multi-ref
+content_channels: [bitmap, sdf, skeleton]
+source: ttf
+font_size_ratio: 0.85
+ttf_epoch_length: 20000
+ensure_diff_source: true
+cjk_start: 0x4E00
+cjk_end: 0x9FFF
+seed: 42
+
+# fonts_root defaults to <data_snapshot>/fonts_free under lab_server.
+# Cache lives next to the fonts (auto): .ttf_supported_chars_128px_0.85.json
+# (already pre-warmed from 01's v1 run on the server)
+
+script_categories:
+  lxgw_wenkai_regular: kai
+  lxgw_wenkai_light: kai
+  lxgw_wenkai_medium: kai
+  ma_shan_zheng: xing
+  long_cang: cao
+  liu_jian_mao_cao: cao
+  zcool_xiaowei: ming
+  zcool_kuaile: decor
+  zcool_qingke_huangyou: hei
+  noto_sans_sc: hei
+  noto_sans_tc: hei
+  noto_serif_sc: ming
+  noto_serif_tc: ming
