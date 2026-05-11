@@ -250,6 +250,8 @@ def main(
     stage = str(train_cfg.get("stage", "a")).lower()
 
     max_steps = 1 if args.dry_run else int(train_cfg.get("max_steps", 1))
+    max_epochs = int(train_cfg.get("max_epochs", 1))
+    log_every = int(train_cfg.get("log_every", 1))
     step = 0
     teacher: torch.nn.Module | None = None
     if stage == "c":
@@ -260,30 +262,51 @@ def main(
         for p in teacher.parameters():
             p.requires_grad_(False)
 
-    for batch in loader:
-        batch = _to_device(batch, device)
-        if stage == "c" and teacher is not None:
-            losses = model.compute_sds_loss(batch, teacher, diffusion)  # type: ignore[arg-type]
-        else:
-            losses = model.compute_loss(batch, diffusion, cfg_dropout=cfg_dropout)
-        loss = losses["loss"]
-        if not torch.isfinite(loss):
-            _logger.error("FATAL: non-finite loss at step %d: %s", step, loss.item())
-            return 2
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        grad_clip = float(train_cfg.get("grad_clip", 0.0))
-        if grad_clip > 0.0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        optimizer.step()
-        log_payload = {k: float(v.detach()) for k, v in losses.items() if isinstance(v, torch.Tensor)}
-        _logger.info("step=%d %s", step, log_payload)
-        step += 1
-        if step >= max_steps:
+    done = False
+    for epoch in range(max_epochs):
+        if done:
             break
+        for batch in loader:
+            batch = _to_device(batch, device)
+            if stage == "c" and teacher is not None:
+                losses = model.compute_sds_loss(batch, teacher, diffusion)  # type: ignore[arg-type]
+            else:
+                losses = model.compute_loss(batch, diffusion, cfg_dropout=cfg_dropout)
+            loss = losses["loss"]
+            if not torch.isfinite(loss):
+                _logger.error("FATAL: non-finite loss at step %d: %s", step, loss.item())
+                return 2
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            grad_clip = float(train_cfg.get("grad_clip", 0.0))
+            if grad_clip > 0.0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optimizer.step()
+            if step % log_every == 0:
+                log_payload = {
+                    k: float(v.detach()) for k, v in losses.items() if isinstance(v, torch.Tensor)
+                }
+                _logger.info("step=%d %s", step, log_payload)
+            step += 1
+            if step >= max_steps:
+                done = True
+                break
 
     if args.dry_run:
         _logger.info("dry-run OK — 1 step completed without errors.")
+    else:
+        ckpt_path = ckpt_dir / "hfh_font_last.pt"
+        torch.save(
+            {
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "step": step,
+                "cfg": cfg.__dict__,
+            },
+            ckpt_path,
+        )
+        _logger.info("saved checkpoint -> %s", ckpt_path)
+    _logger.info("done; final_step=%d dry_run=%s", step, args.dry_run)
     return 0
 
 

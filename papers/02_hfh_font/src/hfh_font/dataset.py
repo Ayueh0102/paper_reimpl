@@ -16,6 +16,7 @@ from paper_reimpl_shared.data.legacy import (
     collate_calligraphy_batch,
 )
 from paper_reimpl_shared.data.manifest import BackendPaths, manifest_path
+from paper_reimpl_shared.data.ttf_pair_dataset import TTFCrossFontPairDataset
 
 __all__ = [
     "build_dataset",
@@ -37,7 +38,7 @@ def build_dataset(
     image_size: int,
     content_channels: list[str],
     n_refs: int,
-) -> CalligraphyJsonlDataset | SyntheticCalligraphyDataset:
+) -> CalligraphyJsonlDataset | SyntheticCalligraphyDataset | TTFCrossFontPairDataset:
     if synthetic:
         return SyntheticCalligraphyDataset(
             length=int(data_cfg.get("synthetic_length", 16)),
@@ -49,6 +50,41 @@ def build_dataset(
             script_vocab_size=int(data_cfg.get("synthetic_script_vocab", 4)),
             ref_count=n_refs,
             seed=int(data_cfg.get("synthetic_seed", 0xC0FFEE)),
+        )
+
+    source = str(data_cfg.get("source", "manifest")).lower()
+    if source == "ttf":
+        # Cross-font TTF pairs from data_snapshot/fonts_free (shared with 01).
+        fonts_root_cfg = data_cfg.get("fonts_root")
+        if fonts_root_cfg:
+            fonts_root = Path(str(fonts_root_cfg))
+        else:
+            fonts_root = paths.ttf_root.parent / "fonts_free"
+        cache_cfg = data_cfg.get("supported_chars_cache")
+        ratio = float(data_cfg.get("font_size_ratio", 0.85))
+        if cache_cfg:
+            cache_path = Path(str(cache_cfg))
+        else:
+            cache_path = fonts_root / f".ttf_supported_chars_{image_size}px_{ratio}.json"
+        # HFH expects multi-channel content (bitmap + sdf + skeleton). The
+        # TTF dataset only renders bitmaps, so the result is broadcast to
+        # len(content_channels) channels by the dataset's content_channels
+        # arg. SDF / skeleton stand-ins won't be present — the model still
+        # trains because TTF Stage A is pretraining without those signals.
+        return TTFCrossFontPairDataset(
+            fonts_root=fonts_root,
+            font_ids=data_cfg.get("font_ids"),
+            image_size=image_size,
+            content_channels=len(content_channels),
+            font_size_ratio=ratio,
+            length=int(data_cfg.get("ttf_epoch_length", 10000)),
+            ref_count=n_refs,
+            seed=int(data_cfg.get("seed", 42)),
+            ensure_diff_source=bool(data_cfg.get("ensure_diff_source", True)),
+            cjk_start=int(data_cfg.get("cjk_start", 0x4E00)),
+            cjk_end=int(data_cfg.get("cjk_end", 0x9FFF)),
+            char_cache_path=cache_path,
+            script_categories=data_cfg.get("script_categories"),
         )
 
     manifest_name = data_cfg.get("manifest")
