@@ -1,0 +1,7 @@
+[entrypoint] paper=hfh_font backend=lab_server
+[entrypoint] manifest_root=D:\Char\ayueh\paper_reimpl\data_snapshot\splits
+[entrypoint] device=cuda:1 dry_run=False synthetic=True
+[hfh_font] device=cuda:1 dry_run=False synthetic=True
+[hfh_font] model built: 25.38M params, cfg=ModelConfig(image_size=128, in_channels=1, content_channels=3, latent_channels=4, vae_down_factor=8, base_channels=64, channel_mult=(1, 2, 4), num_res_blocks=2, attention_resolutions=(4, 2), d_ctx=256, n_heads=4, char_vocab_size=4096, writer_vocab_size=32, script_vocab_size=5, n_refs=4, components_per_ref=4, dropout=0.1, diffusion_timesteps=1000, diffusion_target='x0', sr_enabled=False, sr_scale=2)
+[hfh_font] step=0 {'loss': 0.23569557070732117, 'l_simple': 0.23569557070732117}
+[hfh_font] step=1 {'loss': 0.24028095602989197, 'l_simple': 0.24028095602989197}
