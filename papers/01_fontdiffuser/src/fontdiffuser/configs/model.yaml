@@ -1,0 +1,20 @@
+# FontDiffuser model architecture (blind reimplementation).
+#
+# Defaults chosen to roughly match the paper's "U-Net DDPM" claim at 128px
+# (paper-cited §3) while staying fit-able on a single 16-24 GB GPU. Paper
+# does NOT state exact channel widths -> base_channels and channel_mult are
+# [guessed-because-paper-vague]; see reports/blind_impl.md.
+model:
+  image_size: 128
+  in_channels: 1                      # grayscale glyph
+  content_channels: 1                 # source-glyph render (1 ch). Stage B/C may
+                                      # raise this to 6 for cached content fields.
+  ref_channels: 1                     # one-shot reference glyph
+  base_channels: 64
+  channel_mult: [1, 2, 4, 4]          # 4 stages -> resolutions [128, 64, 32, 16]
+  attn_resolutions: [16]              # self-attn + RSI cross-attn at 16x16
+  num_res_blocks: 2
+  time_embed_dim: 256
+  style_embed_dim: 256
+  num_heads: 4
+  dropout: 0.0

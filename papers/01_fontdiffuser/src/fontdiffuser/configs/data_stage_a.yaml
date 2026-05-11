@@ -1,0 +1,19 @@
+# Stage A — TTF pretraining.
+#
+# Paper §"training" claims FontDiffuser pretrains the diffusion backbone on
+# cross-font pairs before fine-tuning on the target style. We follow that
+# convention. Stage A uses synthetic glyph proxies for the smoke / dry-run
+# path; real Stage A on Ernantang would consume a manifest of TTF-rendered
+# pairs across 13 fonts.
+source: synthetic                     # synthetic | manifest
+synthetic_length: 64
+max_refs: 1                           # FontDiffuser is one-shot.
+writer_vocab_size: 13                 # placeholder = # of TTF fonts
+style_family_vocab_size: 13
+char_vocab_size: 64
+script_vocab_size: 4
+seed: 42
+
+# When promoted to real manifests, populate these instead and set source: manifest:
+manifest: a_main_clean_smoke_a0.jsonl
+content_channels: [bitmap]

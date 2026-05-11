@@ -146,9 +146,15 @@ class GaussianDiffusion:
         ref_images: torch.Tensor | None = None,
         ref_valid: torch.Tensor | None = None,
         cfg_scale: float = 1.0,
+        cfg_uncond_drops_content: bool = True,
         content_guidance_scale: float = 0.0,
         char_guidance_scale: float = 0.0,
     ) -> torch.Tensor:
+        # cfg_uncond_drops_content: when True (legacy default) the CFG uncond
+        # branch zeros the content tensor (full uncond). FontDiffuser-style
+        # papers that only drop the *style ref* during training should pass
+        # False so the uncond branch keeps content (only ref/id fields are
+        # nulled), preventing OOD predictions when cfg_scale > 1.0.
         cond_pred = model(
             x_t,
             timesteps,
@@ -163,10 +169,11 @@ class GaussianDiffusion:
         )
         pred = cond_pred
         if float(cfg_scale) != 1.0:
+            uncond_content = torch.zeros_like(content) if cfg_uncond_drops_content else content
             uncond_pred = model(
                 x_t,
                 timesteps,
-                content=torch.zeros_like(content),
+                content=uncond_content,
                 char_id=None,
                 script_id=None,
                 writer_id=None,
@@ -248,6 +255,7 @@ class GaussianDiffusion:
         ref_images: torch.Tensor | None = None,
         ref_valid: torch.Tensor | None = None,
         cfg_scale: float = 1.0,
+        cfg_uncond_drops_content: bool = True,
         content_guidance_scale: float = 0.0,
         char_guidance_scale: float = 0.0,
         r_char_classifier=None,
@@ -267,6 +275,7 @@ class GaussianDiffusion:
             ref_images=ref_images,
             ref_valid=ref_valid,
             cfg_scale=cfg_scale,
+            cfg_uncond_drops_content=cfg_uncond_drops_content,
             content_guidance_scale=content_guidance_scale,
             char_guidance_scale=char_guidance_scale,
         )
@@ -296,6 +305,7 @@ class GaussianDiffusion:
         ref_images: torch.Tensor | None = None,
         ref_valid: torch.Tensor | None = None,
         cfg_scale: float = 1.0,
+        cfg_uncond_drops_content: bool = True,
         content_guidance_scale: float = 0.0,
         char_guidance_scale: float = 0.0,
         r_char_classifier=None,
@@ -315,6 +325,7 @@ class GaussianDiffusion:
             ref_images=ref_images,
             ref_valid=ref_valid,
             cfg_scale=cfg_scale,
+            cfg_uncond_drops_content=cfg_uncond_drops_content,
             content_guidance_scale=content_guidance_scale,
             char_guidance_scale=char_guidance_scale,
         )
@@ -345,6 +356,7 @@ class GaussianDiffusion:
         ref_valid: torch.Tensor | None = None,
         sampler: str = "ddpm",
         cfg_scale: float = 1.0,
+        cfg_uncond_drops_content: bool = True,
         content_guidance_scale: float = 0.0,
         char_guidance_scale: float = 0.0,
         r_char_classifier=None,
@@ -380,6 +392,7 @@ class GaussianDiffusion:
                 ref_images=ref_images,
                 ref_valid=ref_valid,
                 cfg_scale=cfg_scale,
+                cfg_uncond_drops_content=cfg_uncond_drops_content,
                 content_guidance_scale=content_guidance_scale,
                 char_guidance_scale=char_guidance_scale,
                 r_char_classifier=r_char_classifier,

@@ -1,0 +1,9 @@
+# Stage C — Ernantang target style fine-tune.
+#
+# Uses the most-curated manifest. Same shape as Stage B; production runs swap
+# in a_main_clean_split_source_disjoint.jsonl or
+# a_main_clean_split_character_disjoint_global_coverage.jsonl.
+source: manifest
+manifest: a_main_clean_smoke_a2.jsonl
+content_channels: [bitmap]
+max_refs: 1

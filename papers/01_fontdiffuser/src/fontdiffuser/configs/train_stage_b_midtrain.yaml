@@ -1,0 +1,24 @@
+# Stage B — multi-writer fine-tune on Ernantang.
+# Activates SCR loss (style contrastive) once Stage A pretrain checkpoint is
+# available; assumes the style extractor has been trained separately on
+# writer-id classification.
+seed: 42
+batch_size: 16
+num_workers: 2
+learning_rate: 5.0e-5
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 1
+max_steps: 20000
+log_every: 100
+cfg_drop_prob: 0.1
+scr_weight: 0.1
+scr_embed_dim: 128
+ckpt_dir: experiments/01_fontdiffuser/outputs/stage_b
+
+diffusion:
+  timesteps: 1000
+  beta_start: 1.0e-4
+  beta_end: 2.0e-2
+  beta_schedule: linear
+  prediction_target: epsilon

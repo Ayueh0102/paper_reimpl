@@ -1,0 +1,31 @@
+# Stage A training schedule — TTF pretrain.
+#
+# All schedule numbers are [guessed-because-paper-vague]:
+#   - timesteps T=1000 is the DDPM default (Ho 2020), paper says "DDPM" but
+#     does not pin T.
+#   - β linear from 1e-4 to 2e-2 is the DDPM default.
+#   - epsilon prediction is the DDPM default; paper does not specify x0 vs eps.
+#   - batch_size 16 is sized for a single 24 GB GPU at 128 px; scale linearly.
+#   - cfg_drop_prob 0.1 follows Ho & Salimans 2022.
+#   - scr_weight 0.0 in Stage A — SCR extractor is pretrained / activated in
+#     Stages B/C only (so Stage A focuses on plain denoising).
+seed: 42
+batch_size: 16
+num_workers: 2
+learning_rate: 1.0e-4
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 1
+max_steps: 5000
+log_every: 50
+cfg_drop_prob: 0.1
+scr_weight: 0.0
+scr_embed_dim: 128
+ckpt_dir: experiments/01_fontdiffuser/outputs/stage_a
+
+diffusion:
+  timesteps: 1000
+  beta_start: 1.0e-4
+  beta_end: 2.0e-2
+  beta_schedule: linear
+  prediction_target: epsilon

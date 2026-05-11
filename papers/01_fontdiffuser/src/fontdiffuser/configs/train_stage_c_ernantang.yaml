@@ -1,0 +1,22 @@
+# Stage C — Ernantang final fine-tune.
+# Smaller learning rate, longer schedule on the target-style manifest.
+seed: 42
+batch_size: 8
+num_workers: 2
+learning_rate: 2.0e-5
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 1
+max_steps: 50000
+log_every: 200
+cfg_drop_prob: 0.1
+scr_weight: 0.2
+scr_embed_dim: 128
+ckpt_dir: experiments/01_fontdiffuser/outputs/stage_c
+
+diffusion:
+  timesteps: 1000
+  beta_start: 1.0e-4
+  beta_end: 2.0e-2
+  beta_schedule: linear
+  prediction_target: epsilon

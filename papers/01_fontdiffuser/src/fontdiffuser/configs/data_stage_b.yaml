@@ -1,0 +1,11 @@
+# Stage B — multi-writer fine-tune on Ernantang.
+#
+# Real manifests from the mother repo's
+# experiments/A_unit_geometry_jit/outputs/splits/ are consumed via
+# paper_reimpl_shared.data.manifest. The smoke manifest is used as a default
+# so dry-run + lab-server entrypoint both load without manual editing; promote
+# to a_main_clean_split_unit_disjoint.jsonl (or similar) before real Stage B.
+source: manifest
+manifest: a_main_clean_smoke_a1.jsonl
+content_channels: [bitmap]
+max_refs: 1
