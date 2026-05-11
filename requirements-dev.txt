@@ -1,0 +1,5 @@
+# Dev tools only. Each paper has its own pyproject.toml + uv.lock for actual training deps.
+pytest>=8.0
+pytest-cov>=4.0
+ruff>=0.4
+mypy>=1.10

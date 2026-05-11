@@ -1,0 +1,41 @@
+# --- venv & build ---
+.venv/
+__pycache__/
+*.egg-info/
+*.egg
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- outputs (large) ---
+papers/*/outputs/
+papers/*/.venv/
+shared/.venv/
+logs/
+
+# --- data (do not commit, large) ---
+papers/*/data_snapshot/
+data_snapshot/
+
+# --- third party clones (Phase 2) ---
+third_party/
+
+# --- symlinks ---
+mother_repo_link
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- editor ---
+.vscode/
+.idea/
+*.swp
+*~
+
+# --- secrets / local config ---
+.env
+.env.local
+local_config.toml
