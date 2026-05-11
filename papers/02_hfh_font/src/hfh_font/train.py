@@ -119,8 +119,11 @@ def _build_optimizer(model: torch.nn.Module, train_cfg: dict[str, Any]) -> torch
     lr = float(train_cfg.get("lr", 1e-4))
     weight_decay = float(train_cfg.get("weight_decay", 0.0))
     betas = tuple(train_cfg.get("adam_betas", (0.9, 0.999)))
+    # Only include params that still require grad — when freeze_vae=True the
+    # VAE has been zeroed before this call, so AdamW won't try to step them.
+    trainable = [p for p in model.parameters() if p.requires_grad]
     return torch.optim.AdamW(
-        model.parameters(),
+        trainable,
         lr=lr,
         betas=betas,
         weight_decay=weight_decay,
@@ -240,7 +243,21 @@ def main(
     )
 
     # ------------------------------------------------------------------
-    # Build optimizer
+    # Optional VAE freeze (paper: VAE pretrained in Stage-A, frozen in B/C).
+    # Set `freeze_vae: true` in the train yaml after loading a VAE-only
+    # warm-start via --init-ckpt. The optimizer is built AFTER this so it
+    # only sees trainable params.
+    # ------------------------------------------------------------------
+    if bool(train_cfg.get("freeze_vae", False)):
+        n_frozen = 0
+        for p in model.vae.parameters():
+            p.requires_grad = False
+            n_frozen += 1
+        model.vae.eval()
+        _logger.info("VAE frozen (%d param tensors, eval mode)", n_frozen)
+
+    # ------------------------------------------------------------------
+    # Build optimizer (only trainable params if VAE is frozen)
     # ------------------------------------------------------------------
     optimizer = _build_optimizer(model, train_cfg)
 
