@@ -1,0 +1,41 @@
+# Stage A — real TTF pretraining via on-the-fly PIL rendering.
+#
+# Pairs are constructed at sample time:
+#   target glyph := render(target_font, char)
+#   source glyph := render(source_font, char)        # source_font != target_font
+#   style ref    := render(ref_font, char)           # ref_font may equal target
+#
+# Char vocabulary is the intersection of CJK-Basic (U+4E00..U+9FFF) glyphs
+# that all 13 fonts can render without falling through to .notdef tofu.
+# Result is cached to ``supported_chars_cache`` so repeat runs start in <1s.
+source: ttf
+max_refs: 1                           # FontDiffuser is one-shot.
+font_size_ratio: 0.85
+ttf_epoch_length: 20000               # virtual epoch length; trainer drives by max_steps
+ensure_diff_source: true
+cjk_start: 0x4E00
+cjk_end: 0x9FFF
+
+# ``fonts_root`` defaults to ``<data_snapshot>/fonts_free`` (lab_server) or
+# the equivalent under mother_repo_link (mac_symlink). Override here only
+# if you want a different font set.
+# fonts_root: D:\\Char\\ayueh\\paper_reimpl\\data_snapshot\\fonts_free
+
+# Where to persist the discovered char list. Keeps repeat starts fast.
+supported_chars_cache: papers/01_fontdiffuser/outputs/ttf_supported_chars.json
+
+# script_categories: kai/xing/cao/hei/ming/decor — matches free-font manifest.
+script_categories:
+  lxgw_wenkai_regular: kai
+  lxgw_wenkai_light: kai
+  lxgw_wenkai_medium: kai
+  ma_shan_zheng: xing
+  long_cang: cao
+  liu_jian_mao_cao: cao
+  zcool_xiaowei: ming
+  zcool_kuaile: decor
+  zcool_qingke_huangyou: hei
+  noto_sans_sc: hei
+  noto_sans_tc: hei
+  noto_serif_sc: ming
+  noto_serif_tc: ming
