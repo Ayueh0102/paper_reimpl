@@ -1,0 +1,16 @@
+[entrypoint] paper=fontdiffuser backend=lab_server
+[entrypoint] manifest_root=D:\Char\ayueh\paper_reimpl\data_snapshot\splits
+[entrypoint] device=cuda:0 dry_run=False synthetic=False
+[fontdiffuser] device=cuda:0 steps=200 bs=16 lr=0.0001 scr_weight=0.0 cfg_drop=0.1 timesteps=1000 pred=epsilon schedule=linear
+[fontdiffuser] step=0 loss_total=2.0614 loss_simple=1.1820 loss_perc=87.8624 loss_offset=0.0015 loss_scr=0.0000
+[fontdiffuser] step=20 loss_total=0.6041 loss_simple=0.1227 loss_perc=48.1294 loss_offset=0.0003 loss_scr=0.0000
+[fontdiffuser] step=40 loss_total=0.3218 loss_simple=0.1468 loss_perc=17.4892 loss_offset=0.0002 loss_scr=0.0000
+[fontdiffuser] step=60 loss_total=0.2218 loss_simple=0.1293 loss_perc=9.2427 loss_offset=0.0002 loss_scr=0.0000
+[fontdiffuser] step=80 loss_total=0.2259 loss_simple=0.1294 loss_perc=9.6418 loss_offset=0.0002 loss_scr=0.0000
+[fontdiffuser] step=100 loss_total=0.1774 loss_simple=0.0754 loss_perc=10.1937 loss_offset=0.0001 loss_scr=0.0000
+[fontdiffuser] step=120 loss_total=0.1701 loss_simple=0.0922 loss_perc=7.7782 loss_offset=0.0001 loss_scr=0.0000
+[fontdiffuser] step=140 loss_total=0.1184 loss_simple=0.0686 loss_perc=4.9800 loss_offset=0.0001 loss_scr=0.0000
+[fontdiffuser] step=160 loss_total=0.2252 loss_simple=0.1203 loss_perc=10.4833 loss_offset=0.0001 loss_scr=0.0000
+[fontdiffuser] step=180 loss_total=0.1022 loss_simple=0.0585 loss_perc=4.3725 loss_offset=0.0001 loss_scr=0.0000
+[fontdiffuser] saved checkpoint -> D:\Char\ayueh\paper_reimpl\repo\papers\01_fontdiffuser\outputs\stage_a_shakedown\fontdiffuser_last.pt
+[fontdiffuser] done; final_step=200 dry_run=False
