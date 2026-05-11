@@ -192,6 +192,123 @@ from in Phase 2:
 - [x] `tests/test_smoke.py` runs forward + backward + 1 optimizer step + 1
       sample step on CPU.
 
+## Phase 2 corrections (2026-05-11)
+
+Cloned `yeungchenwa/FontDiffuser` @ `7b28ce9c3b357f4fb23296622f458cf169803539`
+into `third_party/01_fontdiffuser/` and addressed the 5 P0 deltas flagged
+in `reports/github_diff.md`. Files touched (see `Returned summary` at the
+bottom of the implementation report for line ranges):
+
+1. **RSI: deformable-conv warp + offset L1 loss** —
+   replaces the plain cross-attention `RSIBlock` on the up path.
+   - New module: `src/fontdiffuser/model.py::OffsetRefStrucInter`.
+   - Added `style_content_encoder` (a second `ContentEncoder` running on
+     the style image) so the offset head has the per-stage style-content
+     feature pyramid as conditioning context.
+   - U-Net forward now returns `(eps_pred, offset_l1_sum)`, but the top-
+     level `FontDiffuser.forward` keeps the single-tensor contract by
+     stashing the sum in `self._last_offset_l1` (preserves compatibility
+     with the shared `GaussianDiffusion._model_pred`).
+   - `FontDiffuserConfig.offset_l1_weight: float = 0.5` (matches official
+     `offset_coefficient`).
+
+2. **SCR: pretrained VGG-16 + 6 projector heads + InfoNCE(τ=0.07)** —
+   replaces the writer_id supervised NT-Xent.
+   - New module: `src/fontdiffuser/model.py::SCRModule` (with helpers
+     `_SCRStyleFeatExtractor` and `_SCRProjector`).
+   - Uses `torchvision.models.vgg16(pretrained=True)` (frozen) split at
+     the 6 MaxPool boundaries. Each stage's GAP+GMP pooled features
+     compress through a 1×1 conv, then a 3-layer MLP projector
+     (`stage_C → 1024 → 2048 → 2048`) with L2 normalisation.
+   - Positive augmentation: `kornia.augmentation.RandomResizedCrop(
+     scale=(0.8,1.0), ratio=(0.75,1.33))` on the target image.
+   - Negative sampling: dataset emits `batch["neg_images"]` of shape
+     `[B, num_neg=16, C, H, W]` (still TODO at the dataset layer — see
+     "Outstanding" below).
+   - InfoNCE: `info-nce-pytorch::InfoNCE(temperature=0.07,
+     negative_mode='paired')` averaged across the requested
+     `nce_layers` (default `(0, 1, 2, 3)`). Falls back to a manual
+     paired InfoNCE if the `info_nce` package is missing.
+   - Back-compat: `StyleExtractor = SCRModule` so older callers keep
+     working.
+
+3. **Phase 1 loss = MSE + 0.01·VGG-Perceptual + 0.5·Offset** —
+   replaces the single-term diffusion loss.
+   - New module: `src/fontdiffuser/model.py::ContentPerceptualLoss`
+     (VGG-16 enc_1/enc_2/enc_3 MSE on re-normalised inputs).
+   - `compute_loss` in `src/fontdiffuser/train.py` now accepts
+     `perceptual_loss_fn`, `scr_module`, `perceptual_weight`, and
+     `offset_l1_weight`. `main()` builds the perceptual + SCR heads
+     when their coefficients are positive.
+
+4. **CFG dropout drops both content and style** —
+   replaces "ref-only" dropout.
+   - `compute_loss` zeros `content` and nulls `ref_valid` on the same
+     batch rows with probability `cfg_drop_prob`.
+   - `sample.py::sample` now passes `cfg_uncond_drops_content=True` to
+     match (the shared sampler zeros content on the uncond branch).
+
+5. **MCA: concat + SE at inner two stages only** —
+   replaces gated-add at every stage.
+   - Rewrote `MCAFuse` as
+     `Conv1x1(c) → concat → GN-SiLU-Conv1x1 → SELayer(reduction=32) →
+     +concat → GN-SiLU-Conv1x1 → out`.
+   - `FontDiffuserConfig.resolved_mca_stages()` returns `(1, …, N-2)` by
+     default — inner two stages on a 4-stage U-Net.
+   - Token-level style cross-attention (`RSIBlock` on style tokens)
+     fires at MCA stages on both down and up paths plus the middle.
+
+### Dependencies
+
+`pyproject.toml` now requires:
+
+- `torchvision>=0.16` — `DeformConv2d` (RSI) and pretrained VGG-16
+  (perceptual + SCR).
+- `kornia>=0.7` — `RandomResizedCrop` positive augmentation.
+- `info-nce-pytorch>=0.1.4` — `InfoNCE(temperature=0.07,
+  negative_mode='paired')`.
+
+### Outstanding (deferred — *not* P0)
+
+- **Dataset-level `num_neg=16` negative sampler.** The training loop is
+  wired but the dataset adapter still produces no `neg_images`. Phase 2
+  Stage B/C training will be no-op on SCR until
+  `FontDiffuserPairDataset` (or a new class) starts emitting the
+  same-content-different-style negatives. See
+  `third_party/01_fontdiffuser/dataset/font_dataset.py:78-99` for the
+  recipe.
+- **SCR ckpt pretraining.** Paper expects ~210k steps of SCR self-training
+  before Phase 2. `train_cfg["scr_ckpt_path"]` is consumed when set, but
+  we do not yet have a training script for the SCR module itself.
+- **Up/down style cross-attention on every MCA stage.** The blind impl
+  fired RSI only at `attn_resolutions`. We now fire token-level style
+  cross-attention at every MCA stage; this is a behavioural change worth
+  documenting in any retrospective ablation.
+- **β `scaled_linear` schedule, DPM-Solver++, weight_decay=1e-2,
+  resolution=96, channel widths (64,128,256,512), RGB in/out** — all
+  P1 items in `reports/github_diff.md`, not addressed in this Phase 2
+  patch.
+
+### Verification (Phase 2)
+
+```bash
+uv pip install -e .  # picks up torchvision/kornia/info-nce-pytorch
+uv run ruff check src/ tests/
+# -> All checks passed!
+
+uv run pytest tests/test_smoke.py -x -v
+# -> 3 passed (added test_smoke_perceptual_offset_contribute)
+
+uv run python -m paper_reimpl_shared.runner.entrypoint \
+    --paper fontdiffuser --dry-run --synthetic --device cpu \
+    --train src/fontdiffuser/configs/train_stage_a_ttf.yaml \
+    --model src/fontdiffuser/configs/model.yaml \
+    --data src/fontdiffuser/configs/data_stage_a.yaml \
+    --data-backend mac_symlink
+# -> step=0 loss_total=1.9884 loss_simple=1.1866 loss_perc=80.10
+#    loss_offset=0.0016 loss_scr=0.0000  (all finite)
+```
+
 ## Verification commands run
 
 From `papers/01_fontdiffuser/`:

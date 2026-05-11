@@ -1,19 +1,24 @@
-# Stage C — Ernantang finetune (strict cv > ins > cal subset).
+# Stage C — Ernantang finetune (Phase 2 alignment).
 #
-# Same recipe as Stage B but on the Ernantang-only manifest, lower lr.
+# Same recipe as Stage B; smaller lr; Ernantang strict cv>ins>cal subset.
 seed: 42
 batch_size: 16
 num_workers: 0
-learning_rate: 5.0e-5
-weight_decay: 0.05
-grad_clip: 1.0
-max_epochs: 1
+base_learning_rate: 4.5e-6
+learning_rate: ""
+accumulate_grad_batches: 1
+weight_decay: 0.01
+grad_clip: 0.0
+max_epochs: 15
 max_steps: 30000
 log_every: 100
-cfg_drop_prob: 0.1
 
-ce_weight: 1.0
-vq_weight: 0.0
-recon_weight: 0.0
+sup_cl_weight: 0.5
+moco_cache_size: 10
+
+babelstone_path: ~/Char/datasets/ids/cn_mainland/babelstone_cjk_ids.txt
+ids_iffont_path: ~/Char/datasets/ids/cn_mainland/ids_iffont.txt
+
+vqgan_path: ""
 
 ckpt_dir: experiments/03_if_font/outputs/stage_c

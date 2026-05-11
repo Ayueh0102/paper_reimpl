@@ -1,7 +1,7 @@
 [project]
 name = "if_font-reimpl"
 version = "0.1.0"
-description = "Blind reimplementation of IF-Font (NeurIPS 2024) — IDS + VQ tokens + AR Transformer"
+description = "Phase-2 reimplementation of IF-Font (NeurIPS 2024) — IDS + frozen VQGAN + StyleEncoder/3SA/MoCo + AR Transformer"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.1",
@@ -10,10 +10,24 @@ dependencies = [
     "pyyaml>=6.0",
     "pillow>=10.0",
     "pytest>=8.0",
+    "einops>=0.7",
+]
+
+[project.optional-dependencies]
+# Loading the real pretrained CompVis vq-f8-n256 weights requires
+# taming-transformers + omegaconf. The model construction path uses a
+# random-weight stub adapter when these are not installed, so smoke tests
+# do not require them.
+pretrained-vqgan = [
+    "omegaconf>=2.3",
+    "taming-transformers",
 ]
 
 [tool.uv.sources]
 paper-reimpl-shared = { path = "../../shared", editable = true }
+# taming-transformers has no PyPI wheel; install from GitHub at the same
+# revision the official IF-Font uses.
+taming-transformers = { git = "https://github.com/CompVis/taming-transformers", rev = "master" }
 
 [build-system]
 requires = ["hatchling"]

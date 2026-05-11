@@ -1,20 +1,19 @@
-# Stage A — VQ tokenizer pretraining on TTF renders.
+# Stage A — DROPPED in Phase 2.
 #
-# IF-Font requires a pre-trained VQGAN codebook before the AR Transformer
-# can be trained meaningfully (paper "VQGAN, pre-trained, codebook=256").
-# Stage A's job is exactly this codebook pretrain. We do not use IDS at this
-# stage — Stage A trains VQ encoder/decoder + codebook on plain
-# reconstruction.
+# Phase 1 used Stage A as VQGAN-from-scratch pretraining. Phase 2 uses the
+# frozen pretrained CompVis vq-f8-n256, so Stage A is no longer a training
+# stage. This file is retained as a shim for back-compat with older entry
+# points: it points at the same multi-writer data as Stage B but runs zero
+# steps unless `max_steps` is overridden in the matching train YAML.
 source: synthetic               # synthetic | manifest
 synthetic_length: 64
-max_refs: 0                     # no refs during VQ pretrain
-writer_vocab_size: 13           # placeholder = number of TTF fonts
+max_refs: 3                     # Phase 2 default (was 0 in Phase 1)
+writer_vocab_size: 13
 style_family_vocab_size: 13
 char_vocab_size: 64
 script_vocab_size: 4
 seed: 42
 
-# Promote to real manifests by switching source -> manifest and populating:
 manifest: a_main_clean_smoke_a0.jsonl
 content_channels: [bitmap]
 ids_lookup_path: ~/Char/datasets/ids/scripts/lookup_ids.py

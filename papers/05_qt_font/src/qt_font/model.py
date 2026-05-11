@@ -1,25 +1,44 @@
-"""QT-Font model: Dual quadtree graph network + discrete diffusion.
+"""QT-Font model — Phase 2 redesign.
 
-Blind reimplementation — see ``reports/blind_impl.md`` for the decision log.
+The Phase 1 blind impl was a fixed-depth saturated quadtree D3PM over 8-bin
+pixel intensities. The official `lsflyt-pku/QT-Font` repo is a 2-D port of
+DualOctreeGNN over a contour+skeleton point cloud with K=3 axis labels, T=1000
+cosine-schedule D3PM uniform, multi-depth split CE supervision, and graph
+U-Nets over content/style octrees as conditioning. This module ships the
+paper-aligned version of all of those, written in pure PyTorch on top of the
+minimal sparse octree in :mod:`qt_font.octree`.
 
 Conceptual stack
 ----------------
-1. ``quantize_to_states`` : pixel image (B,1,H,W) in [-1,1]
-   → per-leaf categorical states (B, L) over K bins, where L = 4^depth.
-2. ``D3PMUniform``       : adds uniform discrete noise to the leaf states for a
-   given timestep, producing ``x_t`` (one-hot or class indices).
-3. ``QTFontModel``       : the dual quadtree graph U-Net. Takes noisy node states
-   plus conditioning (timestep, content, char_id, writer_id, ref_images) and
-   returns per-leaf state logits ∈ R^{B,L,K} as the discrete reverse process.
-4. ``decode_states_to_image`` : project predicted leaf states back into a pixel
-   image so that the shared sampler / smoke harness can consume it.
+1. **Octree**: glyph image → ``{0=bg, 1=contour, 2=skeleton}`` label map → sparse
+   octree (dense down to ``full_depth``, adaptive past it). See
+   :func:`qt_font.octree.build_octree_from_image`.
 
-The standard entrypoint signature is preserved:
-    QTFontModel.forward(x_t, timesteps, content=..., char_id=..., writer_id=...,
-                        ref_images=..., ref_valid=..., ...) -> pixel tensor
+2. **D3PM Uniform** with K=3 classes, T=1000, cosine (Glide) β schedule.
+   Forward marginals are computed exactly in O(K²) per step.
 
-``x_t`` is a pixel tensor; the wrapper does the quadtree state conversion
-internally so that the model is drop-in for the shared smoke / sampler infra.
+3. **Graph U-Net** with edge-direction-aware GraphConv (5 edge types =
+   N/E/S/W + self) operating on each depth's sparse node list. Time and
+   conditioning are injected per resblock per depth, mirroring
+   ``third_party/05_qt_font/models/graph_diffusion.py:148-149``.
+
+4. **Per-depth split heads** (2-way at inner depths, 3-way at the leaf depth)
+   that supervise the multi-depth CE loss in ``losses.compute_multi_depth_ce``.
+
+Top-level entry points
+----------------------
+* :class:`QTFontConfig`  — dataclass of hyper-params (see Phase 2 train YAML).
+* :class:`QTFontModel`   — the full model. Operates on octrees (NOT pixel tensors).
+* :class:`D3PMUniform`   — discrete diffusion utility (forward q_sample + Q caches).
+* :func:`build_qt_font`  — factory.
+
+Backwards compatibility shim
+----------------------------
+The Phase 1 ``model.forward(x_t, t, content=..., char_id=..., ...)`` pixel
+adapter is preserved for the shared smoke harness; internally it converts the
+pixel tensor into an octree, runs the new model, and renders the leaf labels
+back to a pixel image. The native training loss uses the octree path
+directly — pixels are only a convenience boundary.
 """
 
 from __future__ import annotations
@@ -27,720 +46,795 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Quadtree fan-out: every internal node has exactly four children (NE/NW/SE/SW).
-# Surfaces explicitly so the constant is grep-able and reviewable in one place.
-_QUAD = 4
+from .octree import (
+    OctreeBatch,
+    build_octree_from_image,
+    render_label_image,
+)
 
 # --------------------------------------------------------------------------- #
-# Quadtree construction                                                       #
-# --------------------------------------------------------------------------- #
-
-
-def _full_quadtree_offsets(depth: int) -> tuple[list[int], list[int]]:
-    """Return (level_start, level_size) offsets for a full quadtree of `depth`.
-
-    Level 0 = single root, level d = 4^d nodes. Total nodes = (4^(d+1)-1)/3.
-    """
-    level_size = [_QUAD**lvl for lvl in range(depth + 1)]
-    level_start: list[int] = [0]
-    for s in level_size[:-1]:
-        level_start.append(level_start[-1] + s)
-    return level_start, level_size
-
-
-def _build_parent_child_index(depth: int) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build flat parent/child index tensors for a full quadtree.
-
-    Returns
-    -------
-    parent_of : LongTensor, shape (N,)
-        parent_of[i] = index of parent node (root maps to -1 sentinel).
-    child_of  : LongTensor, shape (N, 4)
-        child_of[i] = 4 child indices (padded with -1 for leaves).
-    """
-    level_start, level_size = _full_quadtree_offsets(depth)
-    total = level_start[-1] + level_size[-1]
-    parent_of = torch.full((total,), -1, dtype=torch.long)
-    child_of = torch.full((total, _QUAD), -1, dtype=torch.long)
-    for lvl in range(depth):
-        s = level_start[lvl]
-        n = level_size[lvl]
-        s_next = level_start[lvl + 1]
-        for k in range(n):
-            cur = s + k
-            for c in range(_QUAD):
-                ch = s_next + k * _QUAD + c
-                child_of[cur, c] = ch
-                parent_of[ch] = cur
-    return parent_of, child_of
-
-
-def _build_leaf_sibling_index(depth: int, image_size: int) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build leaf spatial-neighbor index tensors (4-connectivity within leaf grid).
-
-    Returns
-    -------
-    leaf_neighbors : LongTensor (L, 4)  — N/E/S/W neighbour leaf id (-1 on border)
-    leaf_xy        : LongTensor (L, 2)  — (row, col) of each leaf in the 2^d × 2^d grid
-    """
-    grid = 2**depth
-    leaf_neighbors = torch.full((grid * grid, _QUAD), -1, dtype=torch.long)
-    leaf_xy = torch.zeros((grid * grid, 2), dtype=torch.long)
-    for r in range(grid):
-        for c in range(grid):
-            idx = r * grid + c
-            leaf_xy[idx, 0] = r
-            leaf_xy[idx, 1] = c
-            if r > 0:
-                leaf_neighbors[idx, 0] = (r - 1) * grid + c
-            if c + 1 < grid:
-                leaf_neighbors[idx, 1] = r * grid + (c + 1)
-            if r + 1 < grid:
-                leaf_neighbors[idx, 2] = (r + 1) * grid + c
-            if c > 0:
-                leaf_neighbors[idx, 3] = r * grid + (c - 1)
-    return leaf_neighbors, leaf_xy
-
-
-def quantize_to_states(image: torch.Tensor, *, depth: int, n_states: int) -> torch.Tensor:
-    """Pixel image (B,1,H,W) in [-1,1] → per-leaf class indices (B, L).
-
-    Strategy: split image into 2^depth × 2^depth tiles; mean-pool each tile;
-    map [-1,1] → {0,...,K-1} by uniform binning. This is the natural fully
-    saturated quadtree of fixed depth.
-
-    Notes
-    -----
-    For batched, fixed-shape tensors we use a *full* (saturated) quadtree
-    rather than the paper's adaptive sparse one. The expressivity is roughly
-    equivalent at this depth, and it makes the model trainable with stock
-    PyTorch ops. See blind_impl.md.
-    """
-    if image.dim() != 4:
-        raise ValueError(f"expected (B,1,H,W), got {tuple(image.shape)}")
-    grid = 2**depth
-    B, _C, H, W = image.shape
-    if H % grid != 0 or W % grid != 0:
-        raise ValueError(f"image size {H}x{W} not divisible by 2^depth={grid}")
-    pooled = F.adaptive_avg_pool2d(image, (grid, grid))  # (B, C, grid, grid)
-    pooled = pooled.mean(dim=1)  # (B, grid, grid) treat content as 1-channel
-    # Map [-1, 1] → [0, K-1] integer
-    normalized = ((pooled + 1.0) * 0.5).clamp(0.0, 1.0 - 1e-6)
-    states = (normalized * n_states).long()
-    return states.reshape(B, grid * grid)
-
-
-def decode_states_to_image(
-    state_logits: torch.Tensor,
-    *,
-    depth: int,
-    n_states: int,
-    image_size: int,
-) -> torch.Tensor:
-    """Per-leaf softmax over K classes → pixel image (B, 1, H, W).
-
-    The decoded pixel = E[class index] mapped back to [-1, 1].
-    Then bilinearly upsampled from (2^depth) grid to image_size.
-    """
-    B, L, K = state_logits.shape
-    grid = 2**depth
-    if L != grid * grid:
-        raise ValueError(f"leaf count {L} mismatch with depth {depth} (expected {grid*grid})")
-    if K != n_states:
-        raise ValueError(f"n_states={n_states} mismatch with logits last dim {K}")
-    probs = F.softmax(state_logits, dim=-1)
-    bin_centers = torch.linspace(-1.0, 1.0, n_states + 1, device=probs.device)
-    bin_centers = (bin_centers[:-1] + bin_centers[1:]) * 0.5
-    expected = (probs * bin_centers).sum(dim=-1)  # (B, L)
-    expected_grid = expected.reshape(B, 1, grid, grid)
-    if image_size == grid:
-        return expected_grid
-    return F.interpolate(expected_grid, size=(image_size, image_size), mode="bilinear", align_corners=False)
-
-
-def build_quadtree_states(
-    image: torch.Tensor, *, depth: int, n_states: int
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Compose ``quantize_to_states`` with parent/child index tensors.
-
-    Returns
-    -------
-    leaf_states : (B, L) long
-    parent_of   : (N,)   long
-    child_of    : (N, 4) long
-    """
-    leaf_states = quantize_to_states(image, depth=depth, n_states=n_states)
-    parent_of, child_of = _build_parent_child_index(depth)
-    return leaf_states, parent_of, child_of
-
-
-# --------------------------------------------------------------------------- #
-# Discrete diffusion (D3PM Uniform)                                           #
+# D3PM Uniform with cosine schedule (paper schedule_deltas S1, S2, S3).        #
 # --------------------------------------------------------------------------- #
 
 
 class D3PMUniform(nn.Module):
-    """Discrete diffusion with uniform transition matrix.
+    """Discrete diffusion with uniform transition matrix and cosine β schedule.
 
-    Following Austin et al. 2021 (D3PM). The transition matrix at step t is::
+    Mirrors ``third_party/05_qt_font/datasets/chinesefont_asymmetric.py:55-81``
+    and ``third_party/05_qt_font/main.py:166-184`` — both compute exactly the
+    same ``Q``, ``Q_T`` and cumulative ``Q_`` tensors. We keep the official
+    parameterisation::
 
-        Q_t = (1 - β_t) · I + β_t / K · 1·1^T
+        Q[t, i, i] = 1 - β_t · (K-1) / K
+        Q[t, i, j != i] = β_t / K
 
-    Cumulative ``Q̄_t = Π_{s<=t} Q_s`` has closed form for uniform schedules::
+    which keeps every row sum exactly 1 for any K (Phase 1's
+    ``(1-β_t)·I + (β_t/K)·11ᵀ`` parameterisation drifts row sums for K > 2).
 
-        Q̄_t[i, j] = ᾱ_t · 1[i==j] + (1 - ᾱ_t) / K
-
-    where ᾱ_t = Π (1 - β_s). We only need q(x_t | x_0) which is a single
-    categorical sample.
-
-    The schedule tensors ``betas`` and ``alphas_cumprod`` are registered as
-    buffers so they move with ``.to(device)`` and do not require a per-step
-    cross-device copy inside :meth:`q_probs`. ``t`` may be drawn from
-    ``[0, T-1]``; ``t=0`` means "one step of noise added", not "clean x_0",
-    matching the sampler convention of iterating ``reversed(range(T))``.
+    Buffers
+    -------
+    betas         : (T,) cosine-schedule β.
+    Q             : (T, K, K) one-step transition.
+    Q_cum         : (T, K, K) cumulative transition Q̄_t = Π_{s≤t} Q_s.
+    Q_T           : (T, K, K) Q transposed (handy for q_posterior_logits).
     """
 
     def __init__(
         self,
         *,
-        n_states: int,
-        timesteps: int = 100,
-        beta_start: float = 1e-4,
-        beta_end: float = 0.02,
-        device: torch.device | str = "cpu",
+        n_states: int = 3,
+        timesteps: int = 1000,
+        schedule: str = "cos",
+        beta_start: float = 0.02,
+        beta_end: float = 1.0,
     ) -> None:
         super().__init__()
         self.n_states = int(n_states)
         self.timesteps = int(timesteps)
-        betas = torch.linspace(beta_start, beta_end, self.timesteps, dtype=torch.float32, device=device)
-        alphas = 1.0 - betas
-        alphas_cumprod = torch.cumprod(alphas, dim=0)
-        # Register as non-persistent buffers: they move with `.to(device)` but
-        # are deterministic functions of (timesteps, beta_start, beta_end) so
-        # there's no need to persist them in state_dict.
+        self.schedule = schedule
+
+        if schedule == "cos":
+            # Glide cosine schedule:
+            #   ᾱ_t = cos²((t/T + 0.008) / 1.008 · π/2)
+            #   β_t = min(1 - ᾱ_t / ᾱ_{t-1}, 0.999)
+            steps = np.arange(self.timesteps + 1, dtype=np.float64) / self.timesteps
+            alpha_bar = np.cos((steps + 0.008) / 1.008 * np.pi / 2) ** 2
+            betas_np = np.minimum(1.0 - alpha_bar[1:] / alpha_bar[:-1], 0.999)
+            betas = torch.tensor(betas_np, dtype=torch.float32)
+        elif schedule == "linear":
+            betas = torch.linspace(beta_start, beta_end, self.timesteps, dtype=torch.float32)
+        else:  # pragma: no cover
+            raise ValueError(f"unknown schedule={schedule!r}")
+
+        K = self.n_states
+        Q = torch.ones(self.timesteps, K, K, dtype=torch.float32)
+        for i in range(K):
+            for j in range(K):
+                if i == j:
+                    Q[:, i, j] = 1.0 - betas * (K - 1) / K
+                else:
+                    Q[:, i, j] = betas / K
+
+        Q_T = Q.permute(0, 2, 1).contiguous()
+        Q_cum = torch.ones(self.timesteps, K, K, dtype=torch.float32)
+        Q_cum[0] = Q[0]
+        for t in range(1, self.timesteps):
+            Q_cum[t] = Q_cum[t - 1] @ Q[t]
+
+        # All buffers — they ride along on `.to(device)` but are deterministic
+        # functions of the schedule so we keep them non-persistent.
         self.register_buffer("betas", betas, persistent=False)
-        self.register_buffer("alphas_cumprod", alphas_cumprod, persistent=False)
+        self.register_buffer("Q", Q, persistent=False)
+        self.register_buffer("Q_T", Q_T, persistent=False)
+        self.register_buffer("Q_cum", Q_cum, persistent=False)
 
     def q_probs(self, x0: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        """q(x_t | x_0) as a categorical probability tensor.
+        """``q(x_t | x_0)`` categorical probabilities. ``x0`` (N,), ``t`` (N,)."""
+        # Q_cum[t] is (K, K); we want the x0-th row → (N, K).
+        return self.Q_cum[t, x0]
+
+    def q_sample(self, x0: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """Sample ``x_t ~ q(x_t | x_0)`` via Gumbel-max on log q_probs.
+
+        Mirrors ``third_party/05_qt_font/datasets/chinesefont_asymmetric.py:102-112``.
+        Gumbel-max is exact and avoids the ``torch.multinomial`` reshape dance.
+        """
+        probs = self.q_probs(x0, t)  # (N, K)
+        logits = torch.log(probs + 1e-8)
+        gumbel = -torch.log(-torch.log(torch.rand_like(logits).clamp(1e-8, 1.0)))
+        return torch.argmax(logits + gumbel, dim=-1)
+
+    def sample_random_step(self, n: int, device: torch.device | str) -> torch.Tensor:
+        return torch.randint(0, self.timesteps, (n,), device=device, dtype=torch.long)
+
+
+# --------------------------------------------------------------------------- #
+# Building blocks: time embedding, edge-typed GraphConv, GraphResBlock.        #
+# --------------------------------------------------------------------------- #
+
+
+class TimeEmbedding(nn.Module):
+    """Sinusoidal time embedding + 2-layer MLP with Swish activation.
+
+    Mirrors ``third_party/05_qt_font/models/graph_diffusion.py:26-44``.
+    """
+
+    def __init__(self, n_channels: int) -> None:
+        super().__init__()
+        if n_channels < 8 or n_channels % 8 != 0:
+            raise ValueError(f"n_channels={n_channels} must be >= 8 and divisible by 8")
+        self.n_channels = n_channels
+        self.lin1 = nn.Linear(n_channels // 4, n_channels)
+        self.lin2 = nn.Linear(n_channels, n_channels)
+
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
+        half_dim = self.n_channels // 8
+        emb = math.log(10_000) / max(1, half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=t.device, dtype=torch.float32) * -emb)
+        emb = t.float()[:, None] * emb[None, :]
+        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
+        # Swish: x * sigmoid(x).
+        emb = self.lin1(emb)
+        emb = emb * torch.sigmoid(emb)
+        return self.lin2(emb)
+
+
+class EdgeTypedGraphConv(nn.Module):
+    """Edge-direction-aware graph convolution.
+
+    Equivalent to the per-edge-type weight stacking in
+    ``third_party/05_qt_font/models/modules_bn.py:66-110``: each of the 4
+    directional edge types (N/E/S/W) has its own weight matrix that is applied
+    to the source node's feature before aggregation; the 5th "self" type is
+    realised as a residual ``W_self · x`` on the destination.
+
+    Forward
+    -------
+    x          : (N, C_in)
+    edge_index : (2, E) long
+    edge_type  : (E,)   long in [0, 3]
+    Returns    : (N, C_out)
+    """
+
+    def __init__(self, in_dim: int, out_dim: int, n_edge_types: int = 4) -> None:
+        super().__init__()
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.n_edge_types = n_edge_types
+        # One weight per directional edge type + one for the self loop.
+        self.edge_weights = nn.Parameter(torch.empty(n_edge_types, in_dim, out_dim))
+        self.self_weight = nn.Parameter(torch.empty(in_dim, out_dim))
+        self.bias = nn.Parameter(torch.zeros(out_dim))
+        nn.init.kaiming_uniform_(self.edge_weights, a=math.sqrt(5))
+        nn.init.kaiming_uniform_(self.self_weight, a=math.sqrt(5))
+
+    def forward(
+        self, x: torch.Tensor, edge_index: torch.Tensor, edge_type: torch.Tensor
+    ) -> torch.Tensor:
+        out = x @ self.self_weight  # (N, out_dim) — self loop
+        if edge_index.numel() > 0:
+            src = edge_index[0]
+            dst = edge_index[1]
+            # Per-edge weight: gather W[edge_type] then matmul with x[src].
+            # Equivalent to (W_e · x_src) but in a vectorised way.
+            W_per_edge = self.edge_weights[edge_type]  # (E, in, out)
+            x_src = x[src]  # (E, in)
+            msg = torch.einsum("ei,eio->eo", x_src, W_per_edge)
+            # Scatter-add into the destination.
+            out.index_add_(0, dst, msg)
+        return out + self.bias
+
+
+class GraphResBlock(nn.Module):
+    """Pre-activation graph residual block with timestep + cond conditioning.
+
+    Mirrors ``GraphResBlocks(.., resblock_type='basic')`` in
+    ``third_party/05_qt_font/models/modules_bn.py``: BN → SiLU → GraphConv →
+    AddTimeCond → BN → SiLU → GraphConv → +skip.
+    """
+
+    def __init__(self, dim: int, cond_dim: int, n_edge_types: int = 4) -> None:
+        super().__init__()
+        self.norm1 = nn.GroupNorm(num_groups=min(8, dim), num_channels=dim)
+        self.conv1 = EdgeTypedGraphConv(dim, dim, n_edge_types=n_edge_types)
+        self.cond_proj = nn.Linear(cond_dim, dim)
+        self.norm2 = nn.GroupNorm(num_groups=min(8, dim), num_channels=dim)
+        self.conv2 = EdgeTypedGraphConv(dim, dim, n_edge_types=n_edge_types)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_type: torch.Tensor,
+        cond_per_node: torch.Tensor,
+    ) -> torch.Tensor:
+        # GroupNorm expects (N, C) reshaped to (1, C, N) — group_norm operates
+        # per-channel, so we transpose, apply, transpose back.
+        def _gn(norm: nn.GroupNorm, h: torch.Tensor) -> torch.Tensor:
+            return norm(h.t().unsqueeze(0)).squeeze(0).t()
+
+        h = _gn(self.norm1, x)
+        h = F.silu(h)
+        h = self.conv1(h, edge_index, edge_type)
+        h = h + self.cond_proj(F.silu(cond_per_node))
+        h = _gn(self.norm2, h)
+        h = F.silu(h)
+        h = self.conv2(h, edge_index, edge_type)
+        return x + h
+
+
+# --------------------------------------------------------------------------- #
+# Conditioning: graph encoders for content + style octrees.                    #
+# --------------------------------------------------------------------------- #
+
+
+class OctreeEncoder(nn.Module):
+    """Graph U-Net encoder for a content / style reference octree.
+
+    Mirrors the "style_conv + style_encoder + style_downsample" stack in
+    ``third_party/05_qt_font/models/graph_diffusion.py:69-80``. The encoder
+    produces a feature per node at the bottleneck depth (``depth_stop``).
+    """
+
+    def __init__(
+        self,
+        *,
+        in_feat_dim: int,
+        channels_per_depth: dict[int, int],
+        full_depth: int,
+        depth: int,
+        depth_stop: int,
+        n_edge_types: int = 4,
+        cond_dim: int = 64,
+    ) -> None:
+        super().__init__()
+        self.full_depth = full_depth
+        self.depth = depth
+        self.depth_stop = depth_stop
+        # Project input features into channel width at the leaf depth.
+        self.input_conv = EdgeTypedGraphConv(
+            in_feat_dim, channels_per_depth[depth], n_edge_types=n_edge_types
+        )
+        # One resblock per depth from depth → depth_stop (inclusive).
+        self.blocks = nn.ModuleDict()
+        self.downs = nn.ModuleDict()
+        for d in range(depth, depth_stop - 1, -1):
+            self.blocks[str(d)] = GraphResBlock(channels_per_depth[d], cond_dim, n_edge_types)
+            if d > depth_stop:
+                # Downsample: aggregate from depth d into depth d-1 via parent index.
+                self.downs[str(d)] = nn.Linear(channels_per_depth[d], channels_per_depth[d - 1])
+
+    def forward(
+        self, octree: OctreeBatch, cond_dummy: torch.Tensor
+    ) -> dict[int, torch.Tensor]:
+        """Run the encoder.
 
         Parameters
         ----------
-        x0 : LongTensor (B, L) — clean class indices.
-        t  : LongTensor (B,)   — diffusion step per sample.
-
-        Returns
-        -------
-        probs : Tensor (B, L, K)
+        octree : OctreeBatch
+        cond_dummy : (B, cond_dim)
+            Time/conditioning vector; the encoders don't really use it (they
+            run before time is meaningful) but the GraphResBlock signature
+            wants something — we feed zeros. Phase 4 cleanup: split the block.
         """
-        K = self.n_states
-        # ``alphas_cumprod`` lives on the same device as the module after the
-        # caller does ``diffusion.to(device)``; assert rather than silently
-        # paying a per-step host↔device transfer.
-        if self.alphas_cumprod.device != x0.device:
-            raise RuntimeError(
-                f"D3PMUniform device {self.alphas_cumprod.device} != x0 device {x0.device}. "
-                "Call `diffusion.to(x0.device)` once at construction."
+        feats: dict[int, torch.Tensor] = {}
+        # Build per-node input feature: (row/side - 0.5, col/side - 0.5, 1) — a
+        # normalised position + an occupancy flag. This is the moral equivalent
+        # of the 4-channel ``Points(features=cat(xy, one_hot_axis))`` input the
+        # official repo passes to its style_conv (cf. ``main.py:336``).
+        leaf = octree.levels[octree.depth]
+        side = 1 << octree.depth
+        pos = leaf.xy.float() / max(1, side - 1) - 0.5  # (N, 2)
+        occ = torch.ones((leaf.xy.shape[0], 1), device=leaf.xy.device, dtype=pos.dtype)
+        input_feat = torch.cat([pos, occ], dim=-1)
+        # Pad to whatever in_feat_dim was registered for.
+        if input_feat.shape[-1] < self.input_conv.in_dim:
+            pad = torch.zeros(
+                (input_feat.shape[0], self.input_conv.in_dim - input_feat.shape[-1]),
+                device=input_feat.device,
+                dtype=input_feat.dtype,
             )
-        alpha_bar = self.alphas_cumprod.gather(0, t)  # (B,)
-        # alpha_bar.view(-1, 1, 1) broadcasts over the leaf dim (L) and the
-        # state dim (K) of the (B, L, K) one-hot tensor below.
-        alpha_bar = alpha_bar.view(-1, 1, 1)
-        one_hot = F.one_hot(x0, num_classes=K).float()  # (B, L, K)
-        return alpha_bar * one_hot + (1.0 - alpha_bar) / K
+            input_feat = torch.cat([input_feat, pad], dim=-1)
 
-    def q_sample(self, x0: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        """Sample x_t ~ q(x_t | x_0)."""
-        probs = self.q_probs(x0, t)
-        B, L, K = probs.shape
-        flat = probs.reshape(B * L, K)
-        sampled = torch.multinomial(flat, num_samples=1).squeeze(-1)
-        return sampled.reshape(B, L)
-
-    def sample_random_step(self, batch: int, device: torch.device | str) -> torch.Tensor:
-        return torch.randint(0, self.timesteps, (batch,), device=device, dtype=torch.long)
-
-    def loss_x0_ce(self, logits: torch.Tensor, x0: torch.Tensor) -> torch.Tensor:
-        """Cross-entropy on the x_0 prediction (D3PM uses this auxiliary loss).
-
-        ``logits`` shape (B, L, K); ``x0`` shape (B, L).
-        """
-        _B, _L, K = logits.shape
-        return F.cross_entropy(logits.reshape(-1, K), x0.reshape(-1))
-
-
-# --------------------------------------------------------------------------- #
-# Building blocks                                                              #
-# --------------------------------------------------------------------------- #
-
-
-def _timestep_embedding(timesteps: torch.Tensor, dim: int, max_period: int = 10000) -> torch.Tensor:
-    """Sinusoidal time embedding (Vaswani-style)."""
-    half = dim // 2
-    freqs = torch.exp(
-        -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
-    ).to(timesteps.device)
-    args = timesteps.float().unsqueeze(1) * freqs.unsqueeze(0)
-    emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-    if dim % 2 == 1:
-        emb = F.pad(emb, (0, 1))
-    return emb
-
-
-class GraphConv(nn.Module):
-    """Simple message-passing layer on a fixed adjacency.
-
-    For each node, aggregate features from neighbours (mean) and combine with
-    self features through an MLP. Adjacency is provided as an index tensor of
-    shape ``(N, K_neigh)`` where -1 = no neighbour.
-    """
-
-    def __init__(self, in_dim: int, out_dim: int) -> None:
-        super().__init__()
-        self.self_proj = nn.Linear(in_dim, out_dim)
-        self.neigh_proj = nn.Linear(in_dim, out_dim)
-        self.norm = nn.LayerNorm(out_dim)
-
-    def forward(self, x: torch.Tensor, neigh_idx: torch.Tensor) -> torch.Tensor:
-        """x: (B, N, C); neigh_idx: (N, K). Returns (B, N, out)."""
-        B, N, C = x.shape
-        K = neigh_idx.shape[1]
-        # Build a mask & safe index (replace -1 with 0; mask later).
-        valid = (neigh_idx >= 0).float().unsqueeze(0).unsqueeze(-1)  # (1, N, K, 1)
-        idx = neigh_idx.clamp_min(0)  # (N, K)
-        # gather: (B, N, K, C)
-        gathered = x[:, idx.reshape(-1), :].reshape(B, N, K, C)
-        masked = gathered * valid
-        denom = valid.sum(dim=2).clamp_min(1.0)
-        neigh_mean = masked.sum(dim=2) / denom
-        out = self.self_proj(x) + self.neigh_proj(neigh_mean)
-        return F.gelu(self.norm(out))
-
-
-class ContentAwarePool(nn.Module):
-    """Aggregate fine (leaf) features into a coarser graph with learned gates.
-
-    For each parent, pool features from its 4 children weighted by a learned
-    saliency softmax over the children. This is our blind interpretation of the
-    paper's "content-aware pooling" — paper says the gate depends on node
-    content; we let the gate be a small MLP over the child feature vector.
-    """
-
-    def __init__(self, dim: int) -> None:
-        super().__init__()
-        self.score = nn.Linear(dim, 1)
-
-    def forward(self, leaf_x: torch.Tensor, child_of_parents: torch.Tensor) -> torch.Tensor:
-        """leaf_x: (B, L, C); child_of_parents: (P, 4) leaf ids of each parent.
-
-        Returns (B, P, C) aggregated parent features.
-        """
-        B, _L, C = leaf_x.shape
-        P, K = child_of_parents.shape
-        idx = child_of_parents.clamp_min(0).reshape(-1)
-        gathered = leaf_x[:, idx, :].reshape(B, P, K, C)
-        valid = (child_of_parents >= 0).float().unsqueeze(0).unsqueeze(-1)
-        scores = self.score(gathered).squeeze(-1)  # (B, P, K)
-        scores = scores.masked_fill(valid.squeeze(-1) == 0, float("-inf"))
-        attn = F.softmax(scores, dim=-1).unsqueeze(-1)  # (B, P, K, 1)
-        return (gathered * attn).sum(dim=2)
-
-
-class StyleEncoder(nn.Module):
-    """Tiny CNN style encoder for a stack of reference glyphs.
-
-    Input: (B, R, C, H, W) — R reference images.
-    Output: (B, D) pooled style vector.
-    """
-
-    def __init__(self, in_channels: int = 1, embed_dim: int = 128) -> None:
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=4, stride=2, padding=1),
-            nn.GELU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
-            nn.GELU(),
-            nn.Conv2d(64, embed_dim, kernel_size=4, stride=2, padding=1),
-            nn.GELU(),
-            nn.AdaptiveAvgPool2d(1),
-        )
-        self.embed_dim = embed_dim
-
-    def forward(self, refs: torch.Tensor, ref_valid: torch.Tensor | None = None) -> torch.Tensor:
-        if refs.dim() == 4:
-            refs = refs.unsqueeze(1)  # ensure (B, R, C, H, W)
-        B, R, C, H, W = refs.shape
-        flat = refs.reshape(B * R, C, H, W)
-        feats = self.net(flat).reshape(B, R, self.embed_dim)
-        if ref_valid is None:
-            return feats.mean(dim=1)
-        mask = ref_valid.float().unsqueeze(-1)
-        denom = mask.sum(dim=1).clamp_min(1.0)
-        return (feats * mask).sum(dim=1) / denom
-
-
-class ContentEncoder(nn.Module):
-    """Lightweight CNN producing a global content vector from the content image.
-
-    The content image is the source-glyph render (1 ch in Stage A; cached
-    content fields with more channels in Stage B/C).
-    """
-
-    def __init__(self, in_channels: int, embed_dim: int = 128) -> None:
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=4, stride=2, padding=1),
-            nn.GELU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
-            nn.GELU(),
-            nn.Conv2d(64, embed_dim, kernel_size=4, stride=2, padding=1),
-            nn.GELU(),
-            nn.AdaptiveAvgPool2d(1),
-        )
-        self.embed_dim = embed_dim
-
-    def forward(self, content: torch.Tensor) -> torch.Tensor:
-        return self.net(content).flatten(1)
+        h = self.input_conv(input_feat, leaf.edge_index, leaf.edge_type)
+        for d in range(self.depth, self.depth_stop - 1, -1):
+            lvl = octree.levels[d]
+            cond_node = cond_dummy[lvl.batch_id]
+            h = self.blocks[str(d)](h, lvl.edge_index, lvl.edge_type, cond_node)
+            feats[d] = h
+            if d > self.depth_stop:
+                # Pool to parent: scatter-mean h into the (d-1) node list using
+                # the lvl.parent index.
+                parent = lvl.parent
+                parent_lvl = octree.levels[d - 1]
+                pooled = torch.zeros(
+                    (parent_lvl.xy.shape[0], h.shape[-1]),
+                    device=h.device,
+                    dtype=h.dtype,
+                )
+                counts = torch.zeros(
+                    (parent_lvl.xy.shape[0],), device=h.device, dtype=h.dtype
+                )
+                pooled.index_add_(0, parent, h)
+                counts.index_add_(0, parent, torch.ones_like(parent, dtype=h.dtype))
+                pooled = pooled / counts.clamp_min(1.0).unsqueeze(-1)
+                h = self.downs[str(d)](pooled)
+        return feats
 
 
 # --------------------------------------------------------------------------- #
-# Top-level config + model                                                     #
+# Top-level config + model.                                                    #
 # --------------------------------------------------------------------------- #
 
 
 @dataclass
 class ConditioningBundle:
-    """Container for all non-time conditioning signals.
+    """Container for conditioning paths.
 
-    Bundling these means ``encode_conditioning`` / ``predict_logits_*`` /
-    ``sample_states`` take one dataclass instead of a long argument list. The
-    timestep tensor stays a positional arg because it is the diffusion
-    variable (changes every step), whereas everything in this bundle is
-    typically constructed once per batch.
+    The paper-aligned model takes octrees for content + style; the pixel
+    adapter (smoke / shared infra) provides image tensors that we lift into
+    octrees on the fly.
 
-    All fields default to ``None`` so callers only fill the channels they need;
-    the model fills any missing id with its learned null embedding (for
-    classifier-free guidance) and skips the style encoder if ``ref_images`` is
-    absent. ``style_family_id`` and ``unit_id`` are accepted for cross-paper
-    signature compatibility and currently ignored by QT-Font.
+    Backwards-compat fields (``char_id``, ``writer_id``, ``script_id``, etc.)
+    are ACCEPTED so existing call sites do not break, but they are no longer
+    consumed by the model — see paper conditioning_deltas C1.
     """
 
-    content: torch.Tensor
+    content: torch.Tensor | None = None  # (B, 1, H, W) image
+    refs: torch.Tensor | None = None  # (B, R, 1, H, W) image stack
+    # Legacy fields — ignored.
     char_id: torch.Tensor | None = None
     script_id: torch.Tensor | None = None
     writer_id: torch.Tensor | None = None
     style_family_id: torch.Tensor | None = None
     unit_id: torch.Tensor | None = None
-    ref_images: torch.Tensor | None = None
+    ref_images: torch.Tensor | None = None  # alias of `refs` from the smoke harness
     ref_valid: torch.Tensor | None = None
+
+    def resolved_refs(self) -> torch.Tensor | None:
+        return self.refs if self.refs is not None else self.ref_images
 
 
 @dataclass
 class QTFontConfig:
-    """Configuration for QTFontModel.
+    """Configuration for :class:`QTFontModel` — Phase 2 paper-aligned defaults."""
 
-    Most numeric fields are guesses; see ``reports/blind_impl.md`` for citations.
-    """
-
+    # Geometry.
     image_size: int = 128
+    full_depth: int = 4  # depths [0, full_depth] are dense
+    depth: int = 7  # leaf depth (128 px → 7; 256 px → 8)
+    depth_stop: int = 4  # bottleneck depth in the U-Net
+    n_states: int = 3  # {bg, contour, skeleton}
+
+    # Channels per depth. Default mirrors the 128/256 px config in
+    # ``third_party/05_qt_font/models/graph_diffusion.py:421``.
+    channels_per_depth: tuple[int, ...] = (3, 512, 512, 256, 512, 256, 128, 64, 64, 64)
+    cond_dim: int = 256  # time + content/style vector width
+
+    # Diffusion.
+    timesteps: int = 1000
+    schedule: str = "cos"
+
+    # Conditioning.
+    use_style: bool = True
+    use_content: bool = True
+
+    # Backwards-compat fields (paper drops these — kept for shared harness).
     in_channels: int = 1
     content_channels: int = 1
     ref_channels: int = 1
+    char_vocab_size: int = 0
+    writer_vocab_size: int = 0
+    script_vocab_size: int = 0
+    hidden_dim: int = 128  # unused; superseded by channels_per_depth
+    n_layers: int = 2
+    time_embed_dim: int = 256  # alias of cond_dim for legacy YAML keys
 
-    depth: int = 4  # leaf grid = 2^depth × 2^depth (16×16 default)
-    n_states: int = 8  # categorical bins per leaf
-
-    hidden_dim: int = 128
-    n_layers: int = 3
-    time_embed_dim: int = 128
-    style_embed_dim: int = 128
-    content_embed_dim: int = 128
-
-    char_vocab_size: int = 64
-    writer_vocab_size: int = 24
-    script_vocab_size: int = 5
-
-    dropout: float = 0.0
-    ref_dropout: float = 0.1
-
-    timesteps: int = 100
-
-    # Aux fields the synthetic batch may carry but we ignore.
+    # Misc.
     extras: dict = field(default_factory=dict)
 
 
 class QTFontModel(nn.Module):
-    """Dual quadtree graph U-Net for discrete diffusion in leaf state space."""
+    """Paper-aligned QT-Font diffusion model.
+
+    Forward pass
+    ------------
+    1. Inner-octree feature lift from ``leaf.xy`` → graph U-Net encoder.
+    2. Bottleneck mid-blocks.
+    3. Graph U-Net decoder with per-depth predict heads emitting:
+       - 2-way "split / no-split" logits at every inner depth
+       - 3-way "{bg, contour, skeleton}" logits at the leaf depth
+    4. Loss is computed externally over ``logits_per_depth`` against the GT
+       octree's ``split`` + ``leaf_label`` fields. (See :mod:`qt_font.losses`.)
+    """
 
     def __init__(self, cfg: QTFontConfig) -> None:
         super().__init__()
         self.cfg = cfg
-        self._build_graph_buffers(cfg)
-        self._build_conditioning_modules(cfg)
-        self._build_graph_modules(cfg)
+        self._validate()
+        self._build_modules()
 
     # ------------------------------------------------------------------ #
-    # __init__ helpers (split for readability and unit-testability)       #
-    # ------------------------------------------------------------------ #
 
-    def _build_graph_buffers(self, cfg: QTFontConfig) -> None:
-        """Topology buffers: parent/child indices, neighbour grids, leaf maps.
+    def _validate(self) -> None:
+        c = self.cfg
+        if c.full_depth >= c.depth:
+            raise ValueError(f"full_depth ({c.full_depth}) must be < depth ({c.depth})")
+        if c.depth_stop < c.full_depth or c.depth_stop > c.depth:
+            raise ValueError(
+                f"depth_stop ({c.depth_stop}) must be in [full_depth, depth]="
+                f"[{c.full_depth}, {c.depth}]"
+            )
+        if len(c.channels_per_depth) <= c.depth:
+            raise ValueError(
+                f"channels_per_depth has {len(c.channels_per_depth)} entries but depth={c.depth}"
+            )
+        if c.n_states != 3:
+            raise ValueError(
+                f"n_states must be 3 for the paper-aligned axis labels (got {c.n_states})"
+            )
 
-        Pure index gymnastics — no learnable parameters. All registered as
-        non-persistent buffers so they ride along on ``.to(device)`` calls
-        but stay out of ``state_dict``.
-        """
-        parent_of, child_of = _build_parent_child_index(cfg.depth)
-        leaf_neigh, leaf_xy = _build_leaf_sibling_index(cfg.depth, cfg.image_size)
-        self.register_buffer("parent_of", parent_of, persistent=False)
-        self.register_buffer("child_of", child_of, persistent=False)
-        self.register_buffer("leaf_neigh", leaf_neigh, persistent=False)
-        self.register_buffer("leaf_xy", leaf_xy, persistent=False)
+    def _build_modules(self) -> None:
+        c = self.cfg
+        chans = {d: c.channels_per_depth[d] for d in range(c.depth + 1)}
 
-        # Leaves = last level; parents = penultimate level (coarse graph).
-        level_start, level_size = _full_quadtree_offsets(cfg.depth)
-        leaf_start = level_start[-1]
-        leaf_end = leaf_start + level_size[-1]
-        parent_start = level_start[-2]
-        parent_end = parent_start + level_size[-2]
-        self.leaf_start = leaf_start
-        self.leaf_end = leaf_end
-        self.n_leaves = level_size[-1]
-        self.n_parents = level_size[-2]
+        # Time embedding emits (B, cond_dim).
+        self.time_embed = TimeEmbedding(c.cond_dim)
 
-        # Per-parent child indices in leaf-local coords (subtract leaf_start).
-        parent_children = child_of[parent_start:parent_end].clone()  # (P, 4) global ids
-        mask = parent_children >= 0
-        parent_children_local = parent_children.clone()
-        parent_children_local[mask] = parent_children[mask] - leaf_start
-        self.register_buffer("parent_children_local", parent_children_local, persistent=False)
+        # Style + content encoders share the OctreeEncoder shape but have
+        # independent weights — matches the official ``style_*`` / ``content_*``
+        # split (graph_diffusion.py:69-80).
+        encoder_in_feat = 3  # (row, col, occ)
+        if c.use_style:
+            self.style_enc = OctreeEncoder(
+                in_feat_dim=encoder_in_feat,
+                channels_per_depth=chans,
+                full_depth=c.full_depth,
+                depth=c.depth,
+                depth_stop=c.depth_stop,
+                cond_dim=c.cond_dim,
+            )
+            self.style_fc = nn.Linear(2 * chans[c.depth_stop], c.cond_dim // 2)
+        if c.use_content:
+            self.content_enc = OctreeEncoder(
+                in_feat_dim=encoder_in_feat,
+                channels_per_depth=chans,
+                full_depth=c.full_depth,
+                depth=c.depth,
+                depth_stop=c.depth_stop,
+                cond_dim=c.cond_dim,
+            )
+            self.content_fc = nn.Linear(2 * chans[c.depth_stop], c.cond_dim // 2)
+        if not (c.use_style or c.use_content):
+            # Fully unconditional — register an empty learnable cond so the
+            # rest of the pipeline doesn't have to special-case None.
+            self.uncond_cond = nn.Parameter(torch.zeros(c.cond_dim))
 
-        # Inverse map: leaf id → parent id within the coarse level.
-        leaf_to_parent = torch.zeros(level_size[-1], dtype=torch.long)
-        for p in range(level_size[-2]):
-            for k in range(_QUAD):
-                lid = int(parent_children_local[p, k].item())
-                if 0 <= lid < level_size[-1]:
-                    leaf_to_parent[lid] = p
-        self.register_buffer("leaf_to_parent", leaf_to_parent, persistent=False)
+        # The input octree (noisy) is lifted with an in_feat_dim of 3 same as
+        # the cond encoders: (row, col, occ); we *also* concatenate the one-hot
+        # axis label at the leaf depth so the model knows which of K labels the
+        # noisy sample carries. That makes the total input feat width
+        # (3 + K) = 6 at the leaf depth.
+        self.input_conv = EdgeTypedGraphConv(3 + c.n_states, chans[c.depth])
 
-        # Coarse-graph neighbours: parents live on a 2^(depth-1) grid.
-        coarse_neigh, _coarse_xy = _build_leaf_sibling_index(cfg.depth - 1, cfg.image_size)
-        self.register_buffer("coarse_neigh", coarse_neigh, persistent=False)
+        # U-Net encoder: depth → depth_stop.
+        self.enc_blocks = nn.ModuleDict()
+        self.enc_downs = nn.ModuleDict()
+        for d in range(c.depth, c.depth_stop - 1, -1):
+            self.enc_blocks[str(d)] = GraphResBlock(chans[d], c.cond_dim)
+            if d > c.depth_stop:
+                self.enc_downs[str(d)] = nn.Linear(chans[d], chans[d - 1])
 
-    def _build_conditioning_modules(self, cfg: QTFontConfig) -> None:
-        """Conditioning encoders + embedding tables (time, content, style, ids)."""
-        # State + 2D positional embeddings for leaves.
-        self.state_embed = nn.Embedding(cfg.n_states, cfg.hidden_dim)
-        grid = 2**cfg.depth
-        self.row_embed = nn.Embedding(grid, cfg.hidden_dim)
-        self.col_embed = nn.Embedding(grid, cfg.hidden_dim)
+        # Bottleneck.
+        self.mid_block1 = GraphResBlock(chans[c.depth_stop], c.cond_dim)
+        self.mid_block2 = GraphResBlock(chans[c.depth_stop], c.cond_dim)
 
-        # Time / content / style.
-        self.time_mlp = nn.Sequential(
-            nn.Linear(cfg.time_embed_dim, cfg.hidden_dim),
-            nn.GELU(),
-            nn.Linear(cfg.hidden_dim, cfg.hidden_dim),
-        )
-        self.content_encoder = ContentEncoder(cfg.content_channels, cfg.content_embed_dim)
-        self.content_proj = nn.Linear(cfg.content_embed_dim, cfg.hidden_dim)
-        self.style_encoder = StyleEncoder(cfg.ref_channels, cfg.style_embed_dim)
-        self.style_proj = nn.Linear(cfg.style_embed_dim, cfg.hidden_dim)
+        # U-Net decoder.
+        self.dec_blocks = nn.ModuleDict()
+        self.dec_ups = nn.ModuleDict()
+        for d in range(c.depth_stop, c.depth + 1):
+            self.dec_blocks[str(d)] = GraphResBlock(chans[d], c.cond_dim)
+            if d > c.depth_stop:
+                self.dec_ups[str(d)] = nn.Linear(chans[d - 1], chans[d])
 
-        # Categorical embeddings (+1 row each for the CFG null id).
-        self.char_embed = nn.Embedding(cfg.char_vocab_size + 1, cfg.hidden_dim)
-        self.writer_embed = nn.Embedding(cfg.writer_vocab_size + 1, cfg.hidden_dim)
-        self.script_embed = nn.Embedding(cfg.script_vocab_size + 1, cfg.hidden_dim)
-        self.null_char_id = cfg.char_vocab_size
-        self.null_writer_id = cfg.writer_vocab_size
-        self.null_script_id = cfg.script_vocab_size
-
-    def _build_graph_modules(self, cfg: QTFontConfig) -> None:
-        """Dual quadtree graph stacks, content-aware pool, broadcast, and head."""
-        self.fine_layers = nn.ModuleList(
-            [GraphConv(cfg.hidden_dim, cfg.hidden_dim) for _ in range(cfg.n_layers)]
-        )
-        self.coarse_layers = nn.ModuleList(
-            [GraphConv(cfg.hidden_dim, cfg.hidden_dim) for _ in range(cfg.n_layers)]
-        )
-        self.pool = ContentAwarePool(cfg.hidden_dim)
-        # Coarse → fine broadcast through a small MLP.
-        self.parent_to_child = nn.Linear(cfg.hidden_dim, cfg.hidden_dim)
-        # Output head: per-leaf state logits.
-        self.head = nn.Sequential(
-            nn.LayerNorm(cfg.hidden_dim),
-            nn.Linear(cfg.hidden_dim, cfg.hidden_dim),
-            nn.GELU(),
-            nn.Linear(cfg.hidden_dim, cfg.n_states),
-        )
-        self.dropout = nn.Dropout(cfg.dropout)
-        self.ref_dropout_p = cfg.ref_dropout
+        # Per-depth predict heads. 2 logits at inner depths, K at leaf depth.
+        self.predict_heads = nn.ModuleDict()
+        for d in range(c.depth_stop, c.depth + 1):
+            out_dim = c.n_states if d == c.depth else 2
+            self.predict_heads[str(d)] = nn.Sequential(
+                nn.Linear(chans[d], 32),
+                nn.SiLU(),
+                nn.Linear(32, out_dim),
+            )
 
     # ------------------------------------------------------------------ #
-    # forward                                                             #
+    # Conditioning.                                                       #
     # ------------------------------------------------------------------ #
+
+    def _encode_cond_octree(
+        self,
+        octree: OctreeBatch,
+        encoder: OctreeEncoder,
+        fc: nn.Linear,
+        cond_dummy: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run encoder, then maxpool+avgpool across nodes per batch → cond vec."""
+        feats = encoder(octree, cond_dummy)
+        h = feats[encoder.depth_stop]  # (N, C)
+        batch_id = octree.levels[encoder.depth_stop].batch_id
+        # Per-batch max + mean pool. ``scatter_max`` is not in pure-PyTorch core,
+        # so we do it via a loop over the batch — fine for B ≤ 16.
+        B = octree.batch_size
+        C = h.shape[-1]
+        max_per_b = torch.zeros((B, C), device=h.device, dtype=h.dtype)
+        mean_per_b = torch.zeros((B, C), device=h.device, dtype=h.dtype)
+        for b in range(B):
+            mask = batch_id == b
+            if mask.any():
+                hb = h[mask]
+                max_per_b[b] = hb.max(dim=0).values
+                mean_per_b[b] = hb.mean(dim=0)
+        pooled = torch.cat([max_per_b, mean_per_b], dim=-1)
+        return fc(pooled)
 
     def encode_conditioning(
         self,
         timesteps: torch.Tensor,
-        cond_bundle: ConditioningBundle,
+        *,
+        content_octree: OctreeBatch | None = None,
+        style_octrees: list[OctreeBatch] | None = None,
     ) -> torch.Tensor:
-        """Fuse (timesteps, content, style, ids) into a single (B, hidden) vector.
+        """Fuse (timesteps, content, style) → (B, cond_dim).
 
-        Missing categorical ids fall back to the learned null-id row to keep the
-        classifier-free guidance path consistent. ``style_family_id`` and
-        ``unit_id`` are part of :class:`ConditioningBundle` for cross-paper
-        compatibility but are ignored here.
+        Style across multiple reference glyphs is mean-pooled in feature space,
+        matching ``third_party/05_qt_font/models/graph_diffusion.py:316-322``.
         """
-        cfg = self.cfg
-        time_in = _timestep_embedding(timesteps, cfg.time_embed_dim)
-        cond = self.time_mlp(time_in)
+        c = self.cfg
+        t_emb = self.time_embed(timesteps)  # (B, cond_dim)
+        cond_parts: list[torch.Tensor] = []
 
-        cond = cond + self.content_proj(self.content_encoder(cond_bundle.content))
+        # Use zeros as the dummy condition for the inner encoders.
+        zero_cond = torch.zeros_like(t_emb)
 
-        if cond_bundle.ref_images is not None:
-            style_vec = self.style_encoder(cond_bundle.ref_images, cond_bundle.ref_valid)
-            cond = cond + self.style_proj(style_vec)
+        if c.use_content and content_octree is not None:
+            content_vec = self._encode_cond_octree(
+                content_octree, self.content_enc, self.content_fc, zero_cond
+            )
+            cond_parts.append(content_vec)
+        else:
+            cond_parts.append(torch.zeros((timesteps.shape[0], c.cond_dim // 2), device=timesteps.device))
 
-        cond = cond + self._embed_id_with_null(
-            cond_bundle.char_id, self.char_embed, self.null_char_id, cond
-        )
-        cond = cond + self._embed_id_with_null(
-            cond_bundle.writer_id, self.writer_embed, self.null_writer_id, cond
-        )
-        cond = cond + self._embed_id_with_null(
-            cond_bundle.script_id, self.script_embed, self.null_script_id, cond
-        )
-        return cond  # (B, hidden)
+        if c.use_style and style_octrees is not None and len(style_octrees) > 0:
+            style_vecs = [
+                self._encode_cond_octree(soct, self.style_enc, self.style_fc, zero_cond)
+                for soct in style_octrees
+            ]
+            style_vec = torch.stack(style_vecs, dim=0).mean(dim=0)
+            cond_parts.append(style_vec)
+        else:
+            cond_parts.append(torch.zeros((timesteps.shape[0], c.cond_dim // 2), device=timesteps.device))
 
-    @staticmethod
-    def _embed_id_with_null(
-        ids: torch.Tensor | None,
-        embed: nn.Embedding,
-        null_id: int,
-        ref_tensor: torch.Tensor,
-    ) -> torch.Tensor:
-        """Embed ``ids``, or the all-null row if ``ids is None``.
+        cond = torch.cat(cond_parts, dim=-1)  # (B, cond_dim)
+        return t_emb + cond
 
-        ``ref_tensor`` is only used to source ``batch_size`` and ``device`` when
-        synthesising the null id tensor.
-        """
-        if ids is not None:
-            return embed(ids)
-        null = torch.full(
-            (ref_tensor.shape[0],), null_id, dtype=torch.long, device=ref_tensor.device
-        )
-        return embed(null)
+    # ------------------------------------------------------------------ #
+    # Octree forward — multi-depth logits.                                #
+    # ------------------------------------------------------------------ #
 
-    def predict_state_logits(
+    def predict_logits(
         self,
-        leaf_states: torch.Tensor,
+        octree: OctreeBatch,
         cond: torch.Tensor,
-    ) -> torch.Tensor:
-        """Run the dual-graph U-Net on (B, L) leaf states + (B, hidden) cond.
+        *,
+        noisy_leaf_label: torch.Tensor | None = None,
+    ) -> dict[int, torch.Tensor]:
+        """Run encoder → bottleneck → decoder → per-depth predict heads.
 
-        Returns per-leaf state logits (B, L, K).
+        Parameters
+        ----------
+        octree : OctreeBatch
+            **Topology comes from this octree** (typically the GT octree during
+            training). The model never has to predict topology at training
+            time — it only predicts (split / no-split) at inner depths and
+            (3-class axis) at the leaf depth, mirroring the official setup
+            where ``octree_out = batch['octree_gt']`` during training
+            (``third_party/05_qt_font/main.py:58``).
+        cond : (B, cond_dim)
+            Conditioning vector; broadcast to per-node via ``batch_id``,
+            mirroring ``graph_diffusion.py:148-149``.
+        noisy_leaf_label : LongTensor (N_leaf,) | None
+            The noisy 3-class label at the leaf depth (``q_sample(x0, t)``).
+            If ``None``, the GT ``octree.levels[depth].leaf_label`` is used —
+            which is fine for smoke tests but is **not** the diffusion training
+            path. The real loss uses noisy labels here.
+
+        Returns
+        -------
+        logits_per_depth : dict[int, Tensor]
+            ``logits_per_depth[d]`` has shape ``(N_d, K)`` where K is 2 at
+            inner depths (split vs no-split) and ``n_states`` (=3) at the leaf
+            depth (axis label).
         """
-        h = self.state_embed(leaf_states)  # (B, L, C)
-        # Add 2D positional embeddings.
-        row = self.leaf_xy[:, 0]
-        col = self.leaf_xy[:, 1]
-        h = h + self.row_embed(row).unsqueeze(0) + self.col_embed(col).unsqueeze(0)
-        # Inject conditioning broadcast.
-        h = h + cond.unsqueeze(1)
+        c = self.cfg
 
-        # Fine graph stack.
-        for layer in self.fine_layers:
-            h = layer(h, self.leaf_neigh)
-            h = self.dropout(h)
+        # Build the leaf input feature: (row, col, occ, one_hot_label).
+        leaf = octree.levels[octree.depth]
+        side = 1 << octree.depth
+        pos = leaf.xy.float() / max(1, side - 1) - 0.5
+        occ = torch.ones((leaf.xy.shape[0], 1), device=pos.device, dtype=pos.dtype)
+        label = noisy_leaf_label if noisy_leaf_label is not None else leaf.leaf_label
+        if label is None:
+            label = torch.zeros((leaf.xy.shape[0],), dtype=torch.long, device=leaf.xy.device)
+        one_hot = F.one_hot(label, num_classes=c.n_states).float()
+        input_feat = torch.cat([pos, occ, one_hot], dim=-1)
 
-        # Pool fine → coarse via content-aware pool.
-        coarse = self.pool(h, self.parent_children_local)  # (B, P, C)
-        # Add conditioning at coarse too.
-        coarse = coarse + cond.unsqueeze(1)
+        h = self.input_conv(input_feat, leaf.edge_index, leaf.edge_type)
 
-        # Coarse graph stack.
-        for layer in self.coarse_layers:
-            coarse = layer(coarse, self.coarse_neigh)
-            coarse = self.dropout(coarse)
+        # Encoder.
+        enc_feats: dict[int, torch.Tensor] = {}
+        for d in range(c.depth, c.depth_stop - 1, -1):
+            lvl = octree.levels[d]
+            cond_node = cond[lvl.batch_id]
+            h = self.enc_blocks[str(d)](h, lvl.edge_index, lvl.edge_type, cond_node)
+            enc_feats[d] = h
+            if d > c.depth_stop:
+                parent = lvl.parent
+                parent_lvl = octree.levels[d - 1]
+                pooled = torch.zeros(
+                    (parent_lvl.xy.shape[0], h.shape[-1]),
+                    device=h.device,
+                    dtype=h.dtype,
+                )
+                counts = torch.zeros(
+                    (parent_lvl.xy.shape[0],), device=h.device, dtype=h.dtype
+                )
+                pooled.index_add_(0, parent, h)
+                counts.index_add_(0, parent, torch.ones_like(parent, dtype=h.dtype))
+                pooled = pooled / counts.clamp_min(1.0).unsqueeze(-1)
+                h = self.enc_downs[str(d)](pooled)
 
-        # Broadcast coarse back to fine (each leaf receives its parent feature).
-        broadcast = self.parent_to_child(coarse)[:, self.leaf_to_parent, :]  # (B, L, C)
-        h = h + broadcast
+        # Bottleneck (two extra resblocks at depth_stop).
+        bottleneck_lvl = octree.levels[c.depth_stop]
+        cond_node = cond[bottleneck_lvl.batch_id]
+        h = self.mid_block1(h, bottleneck_lvl.edge_index, bottleneck_lvl.edge_type, cond_node)
+        h = self.mid_block2(h, bottleneck_lvl.edge_index, bottleneck_lvl.edge_type, cond_node)
 
-        return self.head(h)  # (B, L, K)
+        # Decoder.
+        logits_per_depth: dict[int, torch.Tensor] = {}
+        for d in range(c.depth_stop, c.depth + 1):
+            lvl = octree.levels[d]
+            cond_node = cond[lvl.batch_id]
+            if d > c.depth_stop:
+                # Upsample: each fine node gets its parent's coarse feature.
+                parent = lvl.parent
+                parent_feat = h[parent]
+                h = self.dec_ups[str(d)](parent_feat)
+                # Skip from encoder.
+                if d in enc_feats and enc_feats[d].shape == h.shape:
+                    h = h + enc_feats[d]
+            h = self.dec_blocks[str(d)](h, lvl.edge_index, lvl.edge_type, cond_node)
+            logits_per_depth[d] = self.predict_heads[str(d)](h)
+
+        return logits_per_depth
+
+    # ------------------------------------------------------------------ #
+    # Pixel-space adapter (for shared smoke harness).                     #
+    # ------------------------------------------------------------------ #
 
     def forward(
         self,
         x_t: torch.Tensor,
         timesteps: torch.Tensor,
         *,
-        content: torch.Tensor,
+        content: torch.Tensor | None = None,
+        ref_images: torch.Tensor | None = None,
+        refs: torch.Tensor | None = None,
+        # Legacy id kwargs (accepted, ignored).
         char_id: torch.Tensor | None = None,
         writer_id: torch.Tensor | None = None,
         script_id: torch.Tensor | None = None,
         style_family_id: torch.Tensor | None = None,
         unit_id: torch.Tensor | None = None,
-        ref_images: torch.Tensor | None = None,
         ref_valid: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Standard pixel-in / pixel-out adapter.
+        """Pixel-in / pixel-out adapter.
 
-        Internally converts ``x_t`` (B,1,H,W) into per-leaf categorical states,
-        runs the dual quadtree graph denoiser, decodes back to a pixel image.
-        This makes the model drop-in for the shared GaussianDiffusion sampler
-        and the smoke-test harness, even though the *native* training loss
-        operates on discrete state logits (see :func:`qt_font.train.compute_loss`).
+        Used only by the shared smoke harness and dry-run probes. Internally:
+        ``x_t`` (B,1,H,W) → extract 3-class labels → build sparse octree →
+        run :meth:`predict_logits` → render leaf-argmax back to a pixel image.
 
-        The broad keyword surface is preserved here for cross-paper signature
-        compatibility (shared smoke harness calls every model with the same
-        kwargs); internally we collapse it into a :class:`ConditioningBundle`
-        and delegate. ``style_family_id`` and ``unit_id`` are stored on the
-        bundle but currently ignored by QT-Font.
+        For the *native* training loss, prefer driving :meth:`predict_logits`
+        directly with octrees built by the dataset.
         """
-        bundle = ConditioningBundle(
-            content=content,
-            char_id=char_id,
-            script_id=script_id,
-            writer_id=writer_id,
-            style_family_id=style_family_id,
-            unit_id=unit_id,
-            ref_images=ref_images,
-            ref_valid=ref_valid,
+        c = self.cfg
+        # Build the noisy octree from x_t. Content/style optional.
+        octree = build_octree_from_image(
+            x_t, full_depth=c.full_depth, depth=c.depth
+        ).to(x_t.device)
+        content_octree = None
+        if content is not None and c.use_content:
+            # If content is multi-channel, take the first channel.
+            if content.dim() == 4 and content.shape[1] != 1:
+                content = content[:, :1]
+            content_octree = build_octree_from_image(
+                content, full_depth=c.full_depth, depth=c.depth
+            ).to(x_t.device)
+        refs_in = refs if refs is not None else ref_images
+        style_octrees: list[OctreeBatch] | None = None
+        if refs_in is not None and c.use_style:
+            # refs: (B, R, C, H, W). Build one octree per reference position.
+            R = refs_in.shape[1]
+            style_octrees = []
+            for r in range(R):
+                ref_r = refs_in[:, r, :1]  # take first channel
+                style_octrees.append(
+                    build_octree_from_image(
+                        ref_r, full_depth=c.full_depth, depth=c.depth
+                    ).to(x_t.device)
+                )
+        cond = self.encode_conditioning(
+            timesteps,
+            content_octree=content_octree,
+            style_octrees=style_octrees,
         )
-        cfg = self.cfg
-        leaf_states = quantize_to_states(x_t, depth=cfg.depth, n_states=cfg.n_states)
-        cond = self.encode_conditioning(timesteps, bundle)
-        logits = self.predict_state_logits(leaf_states, cond)
-        return decode_states_to_image(
-            logits, depth=cfg.depth, n_states=cfg.n_states, image_size=cfg.image_size
-        )
-
-    # Used by train.compute_loss to get raw logits (no decode) for D3PM CE loss.
-    def predict_logits_from_image(
-        self,
-        x_t: torch.Tensor,
-        timesteps: torch.Tensor,
-        cond_bundle: ConditioningBundle,
-    ) -> torch.Tensor:
-        cfg = self.cfg
-        leaf_states = quantize_to_states(x_t, depth=cfg.depth, n_states=cfg.n_states)
-        cond = self.encode_conditioning(timesteps, cond_bundle)
-        return self.predict_state_logits(leaf_states, cond)
-
-    def predict_logits_from_states(
-        self,
-        leaf_states: torch.Tensor,
-        timesteps: torch.Tensor,
-        cond_bundle: ConditioningBundle,
-    ) -> torch.Tensor:
-        cond = self.encode_conditioning(timesteps, cond_bundle)
-        return self.predict_state_logits(leaf_states, cond)
+        logits_per_depth = self.predict_logits(octree, cond)
+        # Render: take argmax at the leaf depth and map {0,1,2}→{-1, 0, +1}.
+        leaf_logits = logits_per_depth[c.depth]
+        labels = leaf_logits.argmax(dim=-1)
+        leaf_lvl = octree.levels[c.depth]
+        side = 1 << c.depth
+        B = octree.batch_size
+        img = torch.zeros((B, side, side), device=x_t.device)
+        # Map labels back to a continuous gray image: bg→-1, contour→0, skeleton→+1.
+        mapping = torch.tensor([-1.0, 0.0, 1.0], device=x_t.device)
+        values = mapping[labels]
+        img[leaf_lvl.batch_id, leaf_lvl.xy[:, 0], leaf_lvl.xy[:, 1]] = values
+        img = img.unsqueeze(1)  # (B, 1, side, side)
+        if c.image_size != side:
+            img = F.interpolate(img, size=(c.image_size, c.image_size), mode="bilinear", align_corners=False)
+        return img
 
 
 def build_qt_font(cfg: QTFontConfig) -> QTFontModel:
     return QTFontModel(cfg)
+
+
+# --------------------------------------------------------------------------- #
+# Legacy exports kept so the package surface doesn't break.                    #
+# --------------------------------------------------------------------------- #
+
+
+def quantize_to_states(*_args, **_kwargs):  # pragma: no cover
+    raise NotImplementedError(
+        "quantize_to_states was Phase 1's K=8 intensity-bin path; the Phase 2 "
+        "redesign uses extract_glyph_labels + build_octree_from_image."
+    )
+
+
+def decode_states_to_image(*_args, **_kwargs):  # pragma: no cover
+    raise NotImplementedError(
+        "decode_states_to_image was Phase 1's adapter; use render_label_image "
+        "from qt_font.octree instead."
+    )
+
+
+def build_quadtree_states(*_args, **_kwargs):  # pragma: no cover
+    raise NotImplementedError(
+        "build_quadtree_states was the Phase 1 full-saturated tree path; the "
+        "Phase 2 redesign uses build_octree_from_image (adaptive sparse)."
+    )
+
+
+__all__ = [
+    "ConditioningBundle",
+    "D3PMUniform",
+    "QTFontConfig",
+    "QTFontModel",
+    "build_qt_font",
+    "render_label_image",
+]

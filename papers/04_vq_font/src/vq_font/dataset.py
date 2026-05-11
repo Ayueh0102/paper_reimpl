@@ -50,30 +50,64 @@ __all__ = ["build_dataset", "VQFontDataset", "VQFontSyntheticDataset"]
 logger = logging.getLogger(__name__)
 
 
-# Stable ordering of the 12 + atomic + unknown structure classes — keep this
-# in sync with `scripts/lookup_ids.py::STRUCTURE_NAMES`.
+# 13 structure classes (0..12) per ``third_party/04_vq_font/meta/stru_all.json``.
+# The exact id<->name mapping is not shipped in the official repo (only the
+# numeric labels). We adopt the following best-effort mapping inferred from
+# ``generator.py:cont_similarity`` (line 129+) region templates:
+#
+#   id  template                                    inferred name
+#   --  ------------------------------------------  -------------------------
+#   0   top-bottom split @ row 7                    top_bottom
+#   1   full map (single region)                    atomic
+#   2   3 rows @ 0:5 / 5:8 / 8:                     top_mid_bottom
+#   3   full map                                    overlap   (placeholder)
+#   4   left-right split @ col 7                    left_right
+#   5   full map                                    surround_full
+#   6   full map                                    surround_open_top
+#   7   full map                                    surround_open_bottom
+#   8   composite (right-strip + bottom-row blend)  surround_open_TL
+#   9   composite (lower-right + top/left blend)    surround_open_BR
+#   10  3 cols @ 0:6 / 7:11 / 11:                   left_mid_right
+#   11  full map                                    surround_open_TR
+#   12  full map                                    surround_open_right
+#
+# The name mapping is *informative only* — the model uses ids 0..12 directly.
+# Any caller building a manifest should set ``structure_id`` to the matching
+# integer from ``meta/stru_all.json`` (or our best-effort lookup below).
+#
+# For backward compatibility with manifests using the old 14-way blind-impl
+# string labels, we map those strings into the closest official id; rows
+# whose label doesn't fit are clamped to class 1 ("atomic" / single region),
+# which corresponds to the parameter-free no-op SSEM bias.
+
 STRUCTURE_NAME_TO_ID: dict[str, int] = {
-    "unknown": 0,
+    # Best-effort mapping. Multiple names map to ids 1/3/5/6/7/11/12
+    # (full-map templates) — caller code shouldn't depend on the exact
+    # disambiguation, and we keep the legacy spelling for compat.
     "atomic": 1,
-    "left_right": 2,
-    "top_bottom": 3,
-    "left_mid_right": 4,
-    "top_mid_bottom": 5,
-    "surround_full": 6,
+    "top_bottom": 0,
+    "top_mid_bottom": 2,
+    "left_right": 4,
+    "left_mid_right": 10,
+    "surround_full": 5,
+    "surround_open_top": 6,
     "surround_open_bottom": 7,
-    "surround_open_top": 8,
-    "surround_open_right": 9,
-    "surround_open_TR": 10,
-    "surround_open_TL": 11,
-    "surround_open_BR": 12,
-    "overlap": 13,
+    "surround_open_TR": 11,
+    "surround_open_TL": 8,
+    "surround_open_BR": 9,
+    "surround_open_right": 12,
+    "overlap": 3,
+    # Legacy blind-impl "unknown" sentinel — folded into 'atomic' (class 1,
+    # full-map / single-region template).
+    "unknown": 1,
 }
-if len(STRUCTURE_NAME_TO_ID) != NUM_STRUCTURE_CLASSES:
-    raise ValueError(
-        f"structure id table size mismatch: "
-        f"len(STRUCTURE_NAME_TO_ID)={len(STRUCTURE_NAME_TO_ID)} "
-        f"!= NUM_STRUCTURE_CLASSES={NUM_STRUCTURE_CLASSES}"
-    )
+# Sanity: every value must be a valid id in [0, NUM_STRUCTURE_CLASSES).
+for _name, _sid in STRUCTURE_NAME_TO_ID.items():
+    if not 0 <= _sid < NUM_STRUCTURE_CLASSES:
+        raise ValueError(
+            f"STRUCTURE_NAME_TO_ID[{_name!r}]={_sid} out of range "
+            f"[0, {NUM_STRUCTURE_CLASSES})"
+        )
 
 
 # Cached handle to (get_ids, parse_structure) — `None` once we've decided
@@ -137,7 +171,7 @@ def _structure_id_from_row(row: dict[str, Any]) -> int:
         1. explicit int id ``structure_id``;
         2. string label ``structure`` mapped via ``STRUCTURE_NAME_TO_ID``;
         3. ``parse_structure(get_ids(row['char']))`` via ``lookup_ids.py``;
-        4. 0 (unknown).
+        4. 1 (atomic, the parameter-free full-map SSEM template).
     """
     if "structure_id" in row:
         try:
@@ -148,9 +182,10 @@ def _structure_id_from_row(row: dict[str, Any]) -> int:
             pass
     label = row.get("structure")
     if isinstance(label, str):
-        return STRUCTURE_NAME_TO_ID.get(label, 0)
-    # Fallback: parse IDS for the target char so SSEM gradient doesn't
-    # silently collapse to class 0 when manifests lack the structure field.
+        return STRUCTURE_NAME_TO_ID.get(label, 1)
+    # Fallback: parse IDS for the target char so SSEM bias has a defined
+    # template instead of collapsing to a fixed sentinel. Default ('atomic',
+    # class 1) is the full-map / single-region template.
     char = row.get("char") or row.get("target_char")
     if isinstance(char, str) and char:
         helpers = _load_lookup_ids()
@@ -159,12 +194,12 @@ def _structure_id_from_row(row: dict[str, Any]) -> int:
             try:
                 ids_str = get_ids(char)
                 struct_name = parse_structure(ids_str)
-                return STRUCTURE_NAME_TO_ID.get(struct_name, 0)
+                return STRUCTURE_NAME_TO_ID.get(struct_name, 1)
             except Exception:  # noqa: BLE001 — lookup table issues, etc.
                 logger.debug(
                     "vq_font/dataset: lookup_ids failed for char=%r", char, exc_info=True
                 )
-    return 0
+    return 1
 
 
 class VQFontDataset(CalligraphyJsonlDataset):

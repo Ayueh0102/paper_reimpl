@@ -1,10 +1,10 @@
-# Stage B — multi-writer AR training.
+# Stage B — multi-writer AR training (Phase 2).
 #
-# VQ is now loaded from Stage A. AR transformer learns to predict target
-# tokens conditioned on (IDS, refs).
+# VQGAN is the frozen CompVis pretrained tokenizer. AR transformer learns to
+# predict target tokens conditioned on (IDS, refs, coverage_sim).
 source: synthetic               # promote to `manifest` for real training
 synthetic_length: 128
-max_refs: 1                     # one-shot setup
+max_refs: 3                     # official train.yaml:40 → 3 (val) / 4 (train)
 writer_vocab_size: 24           # Ernantang baseline
 style_family_vocab_size: 32
 char_vocab_size: 4659

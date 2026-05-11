@@ -1,23 +1,36 @@
-# Stage A — Token Prior Refinement Transformer pretrain (paper Stage 2).
+# Stage A — Token Prior Refinement Transformer pretrain (paper-faithful).
 #
-# Paper-cited:
-#   - 300,000 iterations on 1x A6000
-#   - Adam, lr 2e-4
-#   - batch_size 32
-#   - num_heads 8, num_refs 3
-# SSEM structure weight + transformer depth are [guessed-because-paper-vague].
+# Mirrors `cfgs/custom.yaml` of the official repo:
+#   - iter: 1500001 (we round to 1.5M below)
+#   - g_lr: 2e-4
+#   - d_lr: 8e-4 (transformer Stage uses its own disc; not yet wired here)
+#   - step_size: 10000, gamma: 0.95 (StepLR)
+#   - adam_betas: [0.0, 0.9]
+#   - batch_size: 32
+#   - num_heads: 8
+#   - kshot (num_refs): 3
+#
+# Note on lab single-GPU reproducibility: 1.5M steps at batch 32 is a
+# multi-day run on an A6000. For abbreviated training pass `max_steps`
+# explicitly (e.g. 300k for a sanity baseline).
 stage: transformer
 seed: 42
-batch_size: 32
-num_workers: 2
-learning_rate: 2.0e-4
+batch_size: 32                        # official `cfgs/custom.yaml:15`
+num_workers: 6
+g_lr: 2.0e-4                          # official `cfgs/custom.yaml:18`
+adam_betas: [0.0, 0.9]                # official `cfgs/custom.yaml:24`
 weight_decay: 0.0
 grad_clip: 1.0
 max_epochs: 1
-max_steps: 300000                     # paper-cited 300k iters
+max_steps: 1500000                    # official 1.5M (was 300k blind-impl)
 log_every: 100
-structure_weight: 0.1
-# vqgan_ckpt is the Stage-0 checkpoint path (relative to repo root). When
-# missing or non-existent we fall back to random VQGAN init — fine for dry-run.
+scheduler:
+  type: step
+  step_size: 10000                    # official `cfgs/custom.yaml:21`
+  gamma: 0.95                         # official `cfgs/custom.yaml:22`
+# Partial freeze (matches `generator.py:40-49` — early decoder + post_quant
+# trainable). Override to `full` for the strict blind-impl freeze, or
+# `none` to fine-tune the entire VQGAN.
+freeze_vqgan: partial
 vqgan_ckpt: experiments/04_vq_font/outputs/stage_0_vqgan/vqgan_last.pt
 ckpt_dir: experiments/04_vq_font/outputs/stage_a_transformer

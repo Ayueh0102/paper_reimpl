@@ -10,6 +10,11 @@ dependencies = [
     "pyyaml>=6.0",
     "pillow>=10.0",
     "pytest>=8.0",
+    # Phase 2 (post-github_diff): Stage 0 uses VQLPIPSWithDiscriminator.
+    # `lpips` ships pretrained VGG weights via torch.hub on first import.
+    # Falls back to a placeholder if neither lpips nor torchmetrics[image]
+    # is installed (see src/vq_font/vqgan_loss.py:_LpipsWrapper).
+    "lpips>=0.1.4",
 ]
 
 [tool.uv.sources]

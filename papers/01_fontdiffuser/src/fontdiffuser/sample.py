@@ -78,11 +78,15 @@ def sample(
         ref_valid=refs_valid,
         sampler=sampler,
         cfg_scale=cfg_scale,
-        # FontDiffuser training only drops the style ref (not content), so the
-        # CFG uncond branch must keep content; otherwise cfg_scale>1.0 pulls
-        # toward an OOD (zero-content, no-ref) prediction never seen during
-        # training. Fix applied per DL review 2026-05-11.
-        cfg_uncond_drops_content=False,
+        # Phase 2 fix (2026-05-11): the official train-time CFG drop zeros
+        # BOTH content and style (white-out, see
+        # ``third_party/01_fontdiffuser/train.py:182-186``), and the official
+        # DPM-Solver pipeline mirrors that at sample time
+        # (``pipeline_dpm_solver.py:67-71``). Our ``train.compute_loss``
+        # now does the same, so the sample-time uncond MUST drop content
+        # too. Setting True matches the shared ``GaussianDiffusion``
+        # convention (uncond -> ``content=torch.zeros_like(content)``).
+        cfg_uncond_drops_content=True,
         device=device,
     )
 

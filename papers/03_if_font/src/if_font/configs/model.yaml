@@ -1,40 +1,35 @@
-# IF-Font model architecture (blind reimplementation).
+# IF-Font model architecture — Phase 2 (alignment to Stareven233/IF-Font).
 #
-# Paper-cited values (NeurIPS 2024 §"訓練配置"):
-#   * VQGAN codebook size = 256, downsample factor = 8
-#   * Transformer decoder: 10 blocks, 8 heads, dim = 384
-#   * 2 self-attn + 1 cross-attn per block
-# Paper-vague values (see reports/blind_impl.md):
-#   * VQ encoder channel ladder
-#   * IDS encoder depth/width
+# Paper-cited values (NeurIPS 2024, train.yaml + base.yaml):
+#   * VQGAN codebook size = 256, downsample factor = 8, embed_dim = 4 (RGB)
+#   * Transformer decoder: 10 blocks, 8 heads, d_model = 384
+#   * 1 self-attn + 1 cross-attn + 1 FFN per block (NOT 2+1 — paper-note was wrong)
+#   * dropout = 0.1, bias = False
+#   * IDS max_len = 35
+#   * num_refs = 3 (val) / 4 (train, +1 if odd)
+#
+# Resolved per reports/github_diff.md Phase-2 corrections (P0 #1, #2, #7).
 model:
   image_size: 128
-  in_channels: 1                # grayscale glyph
+  in_channels: 3                # RGB — pretrained CompVis VQGAN expects RGB
 
-  # VQ tokenizer (Stage A pre-pretrain target)
+  # Frozen pretrained VQGAN (CompVis vq-f8-n256). Stage-A pretraining is gone.
   vq:
-    base_channels: 64
-    # 4 stages -> 3 downsamples -> factor 8 (paper-cited 8).
-    channel_mult: [1, 2, 2, 4]
-    embedding_dim: 256
+    embedding_dim: 4            # CompVis pretrained latent dim
     codebook_size: 256          # paper-cited
-    commitment_weight: 0.25
-    decay: 0.99
+    downsample_factor: 8
 
-  # IDS text encoder
+  # IDS encoder — bare embedding tables (no Transformer encoder anymore)
   ids_vocab_size: 8192          # upper bound; runtime trims to fitted vocab
-  ids_max_len: 32
-  ids_encoder_layers: 2
-  ids_encoder_heads: 4
-  ids_encoder_dim: 384
+  ids_max_len: 35               # official base.yaml:67
 
-  # AR Transformer decoder (paper-cited 10 blocks, 8 heads, 384 dim)
+  # AR Transformer decoder (paper-cited 10 / 8 / 384)
   d_model: 384
   n_heads: 8
   n_blocks: 10
-  n_self_attn_per_block: 2      # paper-cited 2 self-attn + 1 cross-attn
   ffn_mult: 4
-  dropout: 0.0
+  dropout: 0.1                  # official base.yaml:62
+  bias: false                   # official base.yaml:63
 
   # Reference handling
-  n_refs: 1                     # one-shot setup
+  n_refs: 3                     # train.yaml:40

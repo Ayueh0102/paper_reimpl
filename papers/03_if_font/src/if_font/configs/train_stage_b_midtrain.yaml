@@ -1,24 +1,35 @@
-# Stage B — AR Transformer training over (IDS, refs) → target tokens.
+# Stage B — AR Transformer training over (IDS, refs, coverage_sim) → tokens.
 #
-# Paper-cited training (note "訓練配置"):
-#   batch_size = 128, 15 epochs, AdamW + warmup + cosine, 1× V100 16 GB.
-# We reproduce that with the same optimiser setup. Here we keep batch_size
-# moderate so it fits a single mid-range GPU; users scale up.
+# Phase-2 alignment to official Stareven233/IF-Font:
+#   * Loss = sq (CE on next VQ token) + 0.5 * sup_cl (supervised contrastive
+#     on MoCo style features, keyed by font_id / writer_id)
+#   * Optimizer: 2-group AdamW (decoder β=(0.9, 0.95), other β=(0.9, 0.999)),
+#     weight_decay=0.01 (official Net2NetModel.configure_optimizers:224).
+#   * Schedule: OneCycleLR, pct_start=0.5/max_epochs, final_div_factor=10/25
+#     (official Net2NetModel.configure_optimizers:238-244).
+#   * No grad_clip (official does not set one).
+#   * MoCo cache size = 10 batches of (cl_features, font_id).
 seed: 42
 batch_size: 32
 num_workers: 0
-learning_rate: 2.0e-4
-weight_decay: 0.05
-grad_clip: 1.0
-max_epochs: 1
+base_learning_rate: 4.5e-6      # official base.yaml:3
+learning_rate: ""               # auto = batch_size * accumulate * base_lr; leave empty to use computed
+accumulate_grad_batches: 1
+weight_decay: 0.01              # official Net2NetModel:224
+grad_clip: 0.0
+max_epochs: 15                  # official train.yaml:6
 max_steps: 50000
 log_every: 100
-cfg_drop_prob: 0.1              # classifier-free guidance training
 
-# Stage B focuses on AR; VQ should be (mostly) frozen — keep a small VQ
-# weight in case codebook usage drifts.
-ce_weight: 1.0
-vq_weight: 0.0
-recon_weight: 0.0
+sup_cl_weight: 0.5
+moco_cache_size: 10
+
+# IDS resolver: BabelStone + ids_iffont (vendored).
+babelstone_path: ~/Char/datasets/ids/cn_mainland/babelstone_cjk_ids.txt
+ids_iffont_path: ~/Char/datasets/ids/cn_mainland/ids_iffont.txt
+
+# Optional pretrained CompVis VQGAN path. Without it the model runs with a
+# random-weight stub (smoke-only — generated images will be noise).
+vqgan_path: ""
 
 ckpt_dir: experiments/03_if_font/outputs/stage_b

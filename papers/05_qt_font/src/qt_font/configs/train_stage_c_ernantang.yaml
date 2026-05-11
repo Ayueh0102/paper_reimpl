@@ -1,19 +1,21 @@
-# Stage C — Ernantang few-shot fine-tune.
+# Stage C — Ernantang few-shot fine-tune (Phase 2 paper-aligned).
 #
-# Paper-cited fine-tune batch = 8 (note 027). lr stepped down 10×.
+# lr stepped down 10× from Stage A; small batch + no accumulation for fast
+# fine-tuning on a single writer.
 seed: 2048
-batch_size: 8
+batch_size: 4
 num_workers: 0
 learning_rate: 1.0e-5
-weight_decay: 0.01
+weight_decay: 0.0
 grad_clip: 1.0
+grad_accum: 1
 max_epochs: 50
 max_steps: 1500
 log_every: 25
-cfg_drop_prob: 0.0
 ckpt_dir: experiments/05_qt_font/outputs/stage_c
 
 diffusion:
-  timesteps: 100
-  beta_start: 1.0e-4
-  beta_end: 0.02
+  timesteps: 1000
+  schedule: cos
+  beta_start: 0.02
+  beta_end: 1.0

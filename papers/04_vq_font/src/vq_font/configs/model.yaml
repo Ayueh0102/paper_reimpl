@@ -1,32 +1,30 @@
-# VQ-Font model architecture (blind reimplementation).
+# VQ-Font model architecture (paper-faithful after Phase 2 github_diff fix).
 #
-# Two sub-configs: `vqgan` (Stage 0 codebook) and `transformer` (Stage 1+
-# token-prior refinement). Defaults follow paper-cited values where available:
-#   * vqgan.num_embeddings = 1024 (paper)
-#   * vqgan latent grid 16x16 (paper) — achieved by 3 channel-mult stages.
-#   * transformer.num_heads = 8 (paper)
-#   * transformer.num_refs = 3 (paper)
-# Other numbers (depths, base_channels, embed_dim) are [guessed-because-paper-vague]
-# — see reports/blind_impl.md.
+# References (official repo `Yaomingshuai/VQ-Font`):
+#   * vqgan/custom_vqgan.yaml: codebook size 1024, z_channels 256, base ch=32
+#     (via content_enc_builder / dec_builder InstanceNorm conv stack).
+#   * cfgs/custom.yaml: 8 cross-attn heads, kshot=3, 15 self-attn blocks
+#     with dim_mlp=512 (mlp_ratio=2 against embed_dim=256).
+#   * meta/stru_all.json: 13 structure classes (0..12).
 vqgan:
   image_size: 128
   in_channels: 1
-  base_channels: 64
-  channel_mult: [1, 1, 2, 4]         # 4 stages -> 8x downsample (128 -> 16x16)
-  z_channels: 256
-  embed_dim: 256
+  base_channels: 32                  # official `content_enc_builder` C=32
+  channel_mult: [1, 1, 2, 4]         # 3 stride-2 downsamples -> 16x16 latent
+  z_channels: 256                    # official ddconfig
+  embed_dim: 256                     # official embed_dim
   num_embeddings: 1024               # paper-cited codebook size
   commitment_weight: 0.25            # VQ-VAE standard β
-  num_res_blocks: 2
+  num_res_blocks: 3                  # decoder bottleneck ResBlocks (official 3)
   dropout: 0.0
 
 transformer:
   latent_resolution: 16
   embed_dim: 256
-  num_blocks: 6
+  num_blocks: 15                     # official 15 self-attn-only blocks
   num_heads: 8                       # paper-cited
-  mlp_ratio: 4.0
+  mlp_ratio: 2.0                     # dim_mlp=512 against embed_dim=256
   dropout: 0.0
-  num_refs: 3                        # paper-cited reference count
-  codebook_size: 1024                # mirrors vqgan.num_embeddings
-  num_structures: 14                 # 12 chinese structures + atomic + unknown
+  num_refs: 3                        # paper-cited kshot=3
+  codebook_size: 1024
+  num_structures: 13                 # 13 official classes from meta/stru_all.json

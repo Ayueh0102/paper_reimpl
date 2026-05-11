@@ -1,25 +1,27 @@
-# QT-Font model architecture (blind reimplementation).
+# QT-Font model architecture — Phase 2 paper-aligned.
 #
-# Defaults aim at a 128 px target glyph and a depth-4 saturated quadtree
-# (leaf grid 16 × 16, 256 leaves per sample, n_states=8 categorical bins).
-# Numbers marked [guessed-...] in reports/blind_impl.md.
+# Mirrors third_party/05_qt_font/configs/chinesefont_train.yaml MODEL block.
+# Numbers tagged in reports/blind_impl.md Phase 2 corrections section.
 model:
   image_size: 128
   in_channels: 1                # grayscale glyph
-  content_channels: 1           # 1 ch in Stage A (bitmap); up to 6 in Stage B/C
-  ref_channels: 1               # reference glyph channel count
+  content_channels: 1           # paper: contour-only single channel
+  ref_channels: 1
 
-  # Quadtree geometry.
-  depth: 4                      # 4^4 = 256 leaves on a 16×16 grid
-  n_states: 8                   # categorical bins per leaf (~3-bit intensity)
+  # Octree geometry.
+  full_depth: 4                 # depths [0, full_depth] are dense
+  depth: 7                      # 128 px → 7; 256 px → 8; 512 px → 9
+  depth_stop: 4                 # U-Net bottleneck depth
+  n_states: 3                   # {bg, contour, skeleton}
 
-  # Backbone widths.
-  hidden_dim: 128
-  n_layers: 3                   # number of GraphConv layers per (fine, coarse) stack
-  time_embed_dim: 128
-  style_embed_dim: 128
-  content_embed_dim: 128
+  # Per-depth channel widths — matches graph_diffusion.py:421
+  channels_per_depth: [3, 512, 512, 256, 512, 256, 128, 64, 64, 64]
+  cond_dim: 256
 
-  dropout: 0.0
-  ref_dropout: 0.1              # CFG-style ref drop at train time
-  timesteps: 100                # discrete diffusion T (paper: unspecified)
+  # Diffusion.
+  timesteps: 1000
+  schedule: cos                 # Glide cosine
+
+  # Conditioning toggles. Paper uses both content+style ("char_font_align").
+  use_style: true
+  use_content: true

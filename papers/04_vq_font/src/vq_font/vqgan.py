@@ -1,24 +1,33 @@
 """VQGAN font codebook backbone — Stage 0 of VQ-Font.
 
-Paper note (036_VQ-Font結構感知字體_AAAI2023) describes:
-  * Pre-trained VQGAN font codebook with **size 1024** and **16x16** spatial
-    feature grid (so the encoder is a factor-8 downsample for a 128px input)
-    [paper-cited Phase 0 row 04].
-  * "Token prior refinement" later predicts indices into this codebook with a
-    Transformer (`transformer.py`); during Stage 0 the codebook is trained
-    end-to-end with the standard VQ-VAE / VQGAN recipe:
-      L_vq = L_recon (L1 + L2) + L_commit (commitment β term) +
-             L_codebook (codebook update) + (optional) L_gan.
-    Adversarial loss is **omitted** at Phase 1 — paper says "VQGAN-based
-    framework" but does not specify the discriminator depth and we keep
-    the blind reimpl minimal. A patch-discriminator hook is left as a
-    `[guessed]` extension point in `reports/blind_impl.md`.
+Phase 2 (post-github-diff) note
+-------------------------------
+The official VQ-Font repo (`Yaomingshuai/VQ-Font`) does **not** use the
+taming-transformers `Encoder/Decoder` despite declaring `taming.models.vqgan.VQModel`
+in its YAML. Inside `taming/models/vqgan.py:29-30` the encoder/decoder are
+overridden with:
 
-This module is purposely self-contained: it does **not** import from
-`paper_reimpl_shared.diffusion` (VQ-Font is not a diffusion model). The
-codebook itself is the `VectorQuantize` layer with straight-through gradient
-(Van den Oord 2017 / Esser et al. 2021 — both pre-date the paper and are
-non-controversial reimpl choices).
+    self.encoder = content_enc_builder(C_in=1, C=32, C_out=256)
+    self.decoder = dec_builder(C=32, C_out=1, norm="in", out="tanh",
+                               C_content=256)
+
+i.e. a simple **InstanceNorm conv stack** `1 -> 32 -> 64 -> 128 -> 256`
+with three stride-2 downsamples (no bottleneck attention, no residual
+trunk in the encoder), and a mirror decoder with 3 ResBlocks at the
+bottleneck plus 3 upsample stages back to 128 px. Both produce a
+``[B, 256, 16, 16]`` latent that feeds the codebook of size 1024.
+
+This module rewrites our blind-impl (taming-style residual + attn) to
+match the official InstanceNorm conv stack. The codebook interface
+(``VectorQuantize``) is preserved — only encoder/decoder shape changed.
+
+The legacy `[guessed-because-paper-vague]` field ``num_res_blocks`` is
+retained on ``VQGANConfig`` so existing checkpoints and tests keep
+loading, but it now only governs the *decoder* bottleneck Res stack
+(default 3 to match the official ``dec_builder``).
+
+See ``reports/github_diff.md`` Special focus #1 for the line-level
+diff and rationale.
 """
 
 from __future__ import annotations
@@ -48,21 +57,29 @@ __all__ = [
 class VQGANConfig:
     """Structural hyperparameters for the VQGAN font codebook.
 
-    Defaults follow the paper-cited 1024-entry codebook on a 16x16 feature
-    grid for a 128px input (`down_factors=(2,2,2)` => 8x downsample). Other
-    values are blind reimpl conventions; see `reports/blind_impl.md`.
+    Defaults follow the official repo (``content_enc_builder`` /
+    ``dec_builder`` in ``taming/models/vqgan.py:29-30``):
+
+    * Encoder: ``1 -> C=32 -> 2C -> 4C -> 8C -> C_out=256`` with three
+      stride-2 downsamples, ``InstanceNorm + ReLU`` activations.
+    * Decoder: 3x ResBlock(8C=256) bottleneck + three upsample Conv
+      stages back to ``in_channels`` with ``InstanceNorm`` + ``Tanh``
+      output (we keep ``Tanh`` since training data lives in ``[-1, 1]``).
+
+    ``channel_mult`` is no longer used to control encoder topology (the
+    official builder hard-codes ``C, 2C, 4C, 8C``) but is kept for backward
+    compatibility with ``out_resolution()`` callers.
     """
 
     image_size: int = 128
     in_channels: int = 1
     """Grayscale glyph input. Set to 3 for RGB content fields."""
-    base_channels: int = 64
+    base_channels: int = 32
+    """``C`` in the official builder. The encoder widens
+    ``C -> 2C -> 4C -> 8C`` across three stride-2 stages, then ``8C -> C_out``."""
     channel_mult: tuple[int, ...] = (1, 1, 2, 4)
-    """Per-stage channel multipliers. ``len(channel_mult) - 1`` is the
-    number of stride-2 downsamples (the last stage's downsample is
-    ``Identity``). The paper-cited 16x16 latent grid for a 128px input
-    needs 3 stride-2 stages => 4 entries here. Default matches
-    ``configs/model.yaml``."""
+    """Retained for ``out_resolution()`` only — three stride-2 downsamples
+    (``len(channel_mult) - 1 == 3``) give a 16x16 latent from 128px."""
     z_channels: int = 256
     """Latent channel width before / after the codebook (matches embed_dim)."""
     embed_dim: int = 256
@@ -71,7 +88,9 @@ class VQGANConfig:
     """Paper-cited codebook size (Phase 0 row 04)."""
     commitment_weight: float = 0.25
     """β in VQ-VAE commitment loss; standard 0.25 (Van den Oord 2017)."""
-    num_res_blocks: int = 2
+    num_res_blocks: int = 3
+    """Number of ResBlocks at the decoder bottleneck. Official uses 3
+    (``dec_builder`` lines 61-63). Encoder has no residual trunk."""
     dropout: float = 0.0
 
     def out_resolution(self) -> int:
@@ -80,83 +99,88 @@ class VQGANConfig:
         Encoder does ``len(channel_mult) - 1`` stride-2 downsamples (the last
         stage's downsample is an ``Identity``). For the paper-cited default
         ``channel_mult=(1, 1, 2, 4)`` and ``image_size=128`` this yields
-        ``128 / 2^3 = 16``. Use a different length to change the
-        downsample factor — e.g. ``(1, 2, 4)`` (3 entries) gives a 32x32
-        latent grid for a 128px input.
+        ``128 / 2^3 = 16``.
         """
         return self.image_size // (2 ** (len(self.channel_mult) - 1))
 
 
 # --------------------------------------------------------------------------------------
-# Building blocks
+# Building blocks (InstanceNorm conv stack, matching `content_enc_builder` /
+# `dec_builder` in the official repo)
 # --------------------------------------------------------------------------------------
 
 
-def _gn(channels: int) -> nn.GroupNorm:
-    """GroupNorm whose group count divides `channels`. Probes 32 -> 1."""
-    for g in (32, 16, 8, 4, 2, 1):
-        if channels % g == 0:
-            return nn.GroupNorm(g, channels)
-    return nn.GroupNorm(1, channels)
+class _ConvBlock(nn.Module):
+    """Pre-activation Conv block: (InstanceNorm? -> ReLU -> Conv [-> Upsample]).
+
+    Mirrors ``models/modules/blocks.py:ConvBlock``. Norm is skipped when
+    ``in_channels == 1`` (the official builder does the same — see line 79
+    of ``blocks.py``). ``upsample`` runs *before* the conv, which matches
+    the official "pre-active" ordering.
+    """
+
+    def __init__(
+        self,
+        c_in: int,
+        c_out: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+        padding: int = 1,
+        *,
+        norm: str = "in",
+        activ: str = "relu",
+        upsample: bool = False,
+    ) -> None:
+        super().__init__()
+        self.c_in = c_in
+        self.upsample = upsample
+        if norm == "in":
+            self.norm: nn.Module = nn.InstanceNorm2d(c_in)
+        elif norm == "none":
+            self.norm = nn.Identity()
+        else:
+            raise ValueError(f"_ConvBlock: unsupported norm={norm!r}")
+        if activ == "relu":
+            self.activ: nn.Module = nn.ReLU(inplace=False)
+        elif activ == "none":
+            self.activ = nn.Identity()
+        else:
+            raise ValueError(f"_ConvBlock: unsupported activ={activ!r}")
+        self.conv = nn.Conv2d(c_in, c_out, kernel_size, stride=stride, padding=padding)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Mirror official: skip norm when single-channel input.
+        if self.c_in != 1:
+            x = self.norm(x)
+        x = self.activ(x)
+        if self.upsample:
+            x = F.interpolate(x, scale_factor=2, mode="nearest")
+        return self.conv(x)
 
 
 class _ResBlock(nn.Module):
-    """Pre-norm residual block, used inside both encoder and decoder."""
+    """Pre-active Res block built from two ``_ConvBlock``s + 1x1 skip.
 
-    def __init__(self, in_c: int, out_c: int, *, dropout: float = 0.0) -> None:
+    Matches ``ResBlock`` in ``models/modules/blocks.py:93`` (no upsample/
+    downsample variant — used only at the decoder bottleneck where stride
+    is 1). Activation is ReLU, norm is InstanceNorm.
+    """
+
+    def __init__(self, c_in: int, c_out: int) -> None:
         super().__init__()
-        self.norm1 = _gn(in_c)
-        self.conv1 = nn.Conv2d(in_c, out_c, kernel_size=3, padding=1)
-        self.norm2 = _gn(out_c)
-        self.dropout = nn.Dropout(dropout)
-        self.conv2 = nn.Conv2d(out_c, out_c, kernel_size=3, padding=1)
-        self.skip = nn.Conv2d(in_c, out_c, kernel_size=1) if in_c != out_c else nn.Identity()
+        self.conv1 = _ConvBlock(c_in, c_out, kernel_size=3, stride=1, padding=1,
+                                norm="in", activ="relu")
+        self.conv2 = _ConvBlock(c_out, c_out, kernel_size=3, stride=1, padding=1,
+                                norm="in", activ="relu")
+        self.skip: nn.Module
+        if c_in != c_out:
+            self.skip = nn.Conv2d(c_in, c_out, kernel_size=1)
+        else:
+            self.skip = nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = self.conv1(F.silu(self.norm1(x)))
-        h = self.conv2(self.dropout(F.silu(self.norm2(h))))
-        return h + self.skip(x)
-
-
-class _AttnBlock(nn.Module):
-    """Single-head self-attention used once at the bottleneck (taming-style)."""
-
-    def __init__(self, channels: int) -> None:
-        super().__init__()
-        self.norm = _gn(channels)
-        self.qkv = nn.Conv2d(channels, channels * 3, kernel_size=1)
-        self.proj = nn.Conv2d(channels, channels, kernel_size=1)
-        self.channels = channels
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        b, c, h, w = x.shape
-        qkv = self.qkv(self.norm(x))
-        q, k, v = qkv.chunk(3, dim=1)
-        q = q.reshape(b, c, h * w).transpose(-1, -2)  # [B, HW, C]
-        k = k.reshape(b, c, h * w)                     # [B, C, HW]
-        v = v.reshape(b, c, h * w).transpose(-1, -2)   # [B, HW, C]
-        attn = torch.softmax(torch.matmul(q, k) / (c ** 0.5), dim=-1)
-        out = torch.matmul(attn, v).transpose(-1, -2).reshape(b, c, h, w)
-        return x + self.proj(out)
-
-
-class _Downsample(nn.Module):
-    def __init__(self, channels: int) -> None:
-        super().__init__()
-        self.op = nn.Conv2d(channels, channels, kernel_size=3, stride=2, padding=1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.op(x)
-
-
-class _Upsample(nn.Module):
-    def __init__(self, channels: int) -> None:
-        super().__init__()
-        self.op = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.interpolate(x, scale_factor=2, mode="nearest")
-        return self.op(x)
+        out = self.conv2(self.conv1(x))
+        return out + self.skip(x)
 
 
 # --------------------------------------------------------------------------------------
@@ -168,8 +192,9 @@ class VectorQuantize(nn.Module):
     """Discrete codebook with straight-through gradient.
 
     Implements the standard VQ-VAE quantizer (Van den Oord 2017 §3) with
-    Esser-style commitment + codebook losses surfaced as `quantize_loss` so
-    the trainer can scale them.
+    Esser-style commitment + codebook losses surfaced as ``vq_loss`` so the
+    trainer can scale them. Mathematically identical to the
+    ``VectorQuantizer2`` used in the official taming impl (β=0.25).
     """
 
     def __init__(self, num_embeddings: int, embed_dim: int, *, commitment_weight: float = 0.25) -> None:
@@ -218,103 +243,106 @@ class VectorQuantize(nn.Module):
             indices: any shape long tensor with values in [0, num_embeddings).
 
         Returns:
-            Tensor with one extra leading-channel dim that matches `embed_dim`,
+            Tensor with one extra trailing-channel dim that matches `embed_dim`,
             shaped as ``[..., embed_dim]``.
         """
         return self.codebook(indices)
 
 
 # --------------------------------------------------------------------------------------
-# Encoder / Decoder
+# Encoder / Decoder (official InstanceNorm conv stack)
 # --------------------------------------------------------------------------------------
 
 
 class VQGANEncoder(nn.Module):
-    """Taming-transformers-style convolutional encoder.
+    """Encoder matching ``content_enc_builder`` in the official repo.
 
-    Conv stem -> N stages of (ResBlock x num_res_blocks + Downsample) -> mid
-    block (Res + Attn + Res) -> norm + conv to z_channels. Output is a
-    [B, z_channels, H/8, W/8] feature map for the default 3-stage config.
+    Architecture (for default ``base_channels=32``, ``z_channels=256``,
+    128px input):
+
+        Conv(1, 32, 3/1)            # stem, no norm (single-channel input)
+        Conv(32, 64, 3/2)           # 128 -> 64
+        Conv(64, 128, 3/2)          # 64 -> 32
+        Conv(128, 256, 3/2)         # 32 -> 16
+        Conv(256, 256, 3/1)         # final projection to z_channels
+
+    All non-stem blocks use ``InstanceNorm + ReLU + Conv``. Output is a
+    ``[B, z_channels, 16, 16]`` feature map.
     """
 
     def __init__(self, cfg: VQGANConfig) -> None:
         super().__init__()
-        chs = [cfg.base_channels * m for m in cfg.channel_mult]
-        self.stem = nn.Conv2d(cfg.in_channels, chs[0], kernel_size=3, padding=1)
-
-        self.blocks: nn.ModuleList = nn.ModuleList()
-        self.downsamples: nn.ModuleList = nn.ModuleList()
-        prev_c = chs[0]
-        for i, c in enumerate(chs):
-            stage: list[nn.Module] = []
-            for _ in range(cfg.num_res_blocks):
-                stage.append(_ResBlock(prev_c, c, dropout=cfg.dropout))
-                prev_c = c
-            self.blocks.append(nn.Sequential(*stage))
-            if i < len(chs) - 1:
-                self.downsamples.append(_Downsample(c))
-            else:
-                self.downsamples.append(nn.Identity())
-
-        mid_c = chs[-1]
-        self.mid_res1 = _ResBlock(mid_c, mid_c, dropout=cfg.dropout)
-        self.mid_attn = _AttnBlock(mid_c)
-        self.mid_res2 = _ResBlock(mid_c, mid_c, dropout=cfg.dropout)
-
-        self.out_norm = _gn(mid_c)
-        self.out_conv = nn.Conv2d(mid_c, cfg.z_channels, kernel_size=3, padding=1)
+        c = cfg.base_channels
+        self.stem = _ConvBlock(
+            cfg.in_channels, c, kernel_size=3, stride=1, padding=1,
+            norm="in", activ="relu",
+        )
+        self.down1 = _ConvBlock(c, c * 2, kernel_size=3, stride=2, padding=1,
+                                 norm="in", activ="relu")
+        self.down2 = _ConvBlock(c * 2, c * 4, kernel_size=3, stride=2, padding=1,
+                                 norm="in", activ="relu")
+        self.down3 = _ConvBlock(c * 4, c * 8, kernel_size=3, stride=2, padding=1,
+                                 norm="in", activ="relu")
+        self.out_conv = _ConvBlock(c * 8, cfg.z_channels, kernel_size=3, stride=1,
+                                    padding=1, norm="in", activ="relu")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.stem(x)
-        for stage, down in zip(self.blocks, self.downsamples, strict=True):
-            h = stage(h)
-            h = down(h)
-        h = self.mid_res1(h)
-        h = self.mid_attn(h)
-        h = self.mid_res2(h)
-        return self.out_conv(F.silu(self.out_norm(h)))
+        h = self.down1(h)
+        h = self.down2(h)
+        h = self.down3(h)
+        return self.out_conv(h)
 
 
 class VQGANDecoder(nn.Module):
-    """Mirror of `VQGANEncoder` consuming the quantized latent."""
+    """Decoder matching ``dec_builder`` in the official repo.
+
+    Architecture (default ``base_channels=32``, ``z_channels=256``):
+
+        ResBlock(8C, 8C) x num_res_blocks   # bottleneck (default 3)
+        ConvBlock(8C, 4C, upsample=True)    # 16 -> 32
+        ConvBlock(4C, 2C, upsample=True)    # 32 -> 64
+        ConvBlock(2C, C,  upsample=True)    # 64 -> 128
+        Conv(C, in_channels, 3/1) + Tanh
+
+    All blocks use ``InstanceNorm + ReLU``. We keep ``Tanh`` because our
+    training images live in ``[-1, 1]`` (the official builder calls this
+    out as ``out='tanh'``).
+    """
 
     def __init__(self, cfg: VQGANConfig) -> None:
         super().__init__()
-        chs = [cfg.base_channels * m for m in cfg.channel_mult]
-        rev_chs = list(reversed(chs))
-
-        self.input_conv = nn.Conv2d(cfg.z_channels, rev_chs[0], kernel_size=3, padding=1)
-        mid_c = rev_chs[0]
-        self.mid_res1 = _ResBlock(mid_c, mid_c, dropout=cfg.dropout)
-        self.mid_attn = _AttnBlock(mid_c)
-        self.mid_res2 = _ResBlock(mid_c, mid_c, dropout=cfg.dropout)
-
-        self.blocks: nn.ModuleList = nn.ModuleList()
-        self.upsamples: nn.ModuleList = nn.ModuleList()
-        prev_c = mid_c
-        for i, c in enumerate(rev_chs):
-            stage: list[nn.Module] = []
-            for _ in range(cfg.num_res_blocks):
-                stage.append(_ResBlock(prev_c, c, dropout=cfg.dropout))
-                prev_c = c
-            self.blocks.append(nn.Sequential(*stage))
-            if i < len(rev_chs) - 1:
-                self.upsamples.append(_Upsample(c))
-            else:
-                self.upsamples.append(nn.Identity())
-
-        self.out_norm = _gn(rev_chs[-1])
-        self.out_conv = nn.Conv2d(rev_chs[-1], cfg.in_channels, kernel_size=3, padding=1)
+        c = cfg.base_channels
+        z = cfg.z_channels
+        # Input projection: z_channels -> 8C if they differ. Official has
+        # z_channels == 8C (256 == 32*8) so usually Identity.
+        if z != c * 8:
+            self.in_proj: nn.Module = nn.Conv2d(z, c * 8, kernel_size=1)
+        else:
+            self.in_proj = nn.Identity()
+        self.res_blocks = nn.ModuleList(
+            [_ResBlock(c * 8, c * 8) for _ in range(cfg.num_res_blocks)]
+        )
+        self.up1 = _ConvBlock(c * 8, c * 4, kernel_size=3, stride=1, padding=1,
+                               norm="in", activ="relu", upsample=True)
+        self.up2 = _ConvBlock(c * 4, c * 2, kernel_size=3, stride=1, padding=1,
+                               norm="in", activ="relu", upsample=True)
+        self.up3 = _ConvBlock(c * 2, c, kernel_size=3, stride=1, padding=1,
+                               norm="in", activ="relu", upsample=True)
+        # NOTE: official keeps norm/activ for the final conv too (see
+        # ``ConvBlk(C*1, C_out, 3, 1, 1)`` in ``dec_builder``). We mirror it.
+        self.out_conv = _ConvBlock(c, cfg.in_channels, kernel_size=3, stride=1,
+                                    padding=1, norm="in", activ="relu")
 
     def forward(self, z_q: torch.Tensor) -> torch.Tensor:
-        h = self.input_conv(z_q)
-        h = self.mid_res1(h)
-        h = self.mid_attn(h)
-        h = self.mid_res2(h)
-        for stage, up in zip(self.blocks, self.upsamples, strict=True):
-            h = stage(h)
-            h = up(h)
-        return self.out_conv(F.silu(self.out_norm(h)))
+        h = self.in_proj(z_q)
+        for blk in self.res_blocks:
+            h = blk(h)
+        h = self.up1(h)
+        h = self.up2(h)
+        h = self.up3(h)
+        h = self.out_conv(h)
+        return torch.tanh(h)
 
 
 # --------------------------------------------------------------------------------------
@@ -326,9 +354,8 @@ class VQGANDecoder(nn.Module):
 class VQGANOutputs:
     """Container for VQGAN.forward outputs.
 
-    Using a dataclass keeps train-time call-sites readable (no tuple unpacking
-    of five things). All fields are torch tensors except `z_q` which retains
-    grad to flow back into the encoder via the straight-through estimator.
+    All fields are torch tensors except ``z_q`` which retains grad to flow
+    back into the encoder via the straight-through estimator.
     """
 
     recon: torch.Tensor
@@ -341,9 +368,10 @@ class VQGANOutputs:
 class VQGAN(nn.Module):
     """End-to-end VQGAN: encoder -> codebook quantize -> decoder.
 
-    Stage 0 of VQ-Font pretrains this whole module on a font corpus (paper
-    says 200k iters on 1xA6000); Stages 1+ freeze the encoder + codebook +
-    decoder and only train the Transformer.
+    Stage 0 of VQ-Font pretrains this whole module on a font corpus; Stage
+    1+ partially freezes it (encoder + late decoder + codebook frozen, the
+    three early decoder layers + ``post_quant_conv`` stay trainable — see
+    ``model.VQFont._partial_freeze_vqgan``).
     """
 
     def __init__(self, cfg: VQGANConfig) -> None:
@@ -357,7 +385,8 @@ class VQGAN(nn.Module):
         )
         self.decoder = VQGANDecoder(cfg)
         # Project encoder output to codebook dim if mismatched; usually
-        # z_channels == embed_dim and these are identities.
+        # z_channels == embed_dim and these are identities. Names match the
+        # official ``quant_conv`` / ``post_quant_conv`` so checkpoints port.
         self.pre_quant = (
             nn.Conv2d(cfg.z_channels, cfg.embed_dim, kernel_size=1)
             if cfg.z_channels != cfg.embed_dim

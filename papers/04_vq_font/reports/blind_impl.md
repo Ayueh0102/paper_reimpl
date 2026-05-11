@@ -1,5 +1,13 @@
 # Blind Implementation — VQ-Font (04)
 
+> **Phase 2 update (post-github-diff)**: many of the original
+> `[guessed-because-paper-vague]` decisions below were superseded by
+> Phase 2 fixes after reading the official repo. See
+> `reports/github_diff.md` for the line-level audit and the table at the
+> bottom of this file ("Phase 2 supersedes") for which decisions were
+> rewritten. The decision log below remains as the historical Phase 1
+> record; the current code state follows the Phase 2 directions.
+
 Decision log for the Phase 1 blind reimplementation. Every non-trivial
 choice is tagged either `[paper-cited <source>]` when sourced from the
 Obsidian paper note or the Phase 0 spec table, `[guessed-because-paper-vague]`
@@ -212,6 +220,34 @@ from in Phase 2:
   forward+backward+step (with frozen-VQGAN assertion), and sample
   (argmax + top-k) pipelines. CPU-only, no disk I/O.
 
+## Phase 2 supersedes
+
+The Phase 2 (`reports/github_diff.md`) rewrite changed the following
+decisions. See `paper_notes/04.md` for the architectural details.
+
+| #  | Phase 1 decision (blind)                                | Phase 2 (paper-faithful)                                                                                |
+|---:|---------------------------------------------------------|---------------------------------------------------------------------------------------------------------|
+| 3  | No Stage 0 GAN                                          | **Added** `VQLPIPSWithDiscriminator` (hinge GAN, `disc_start=10000`, `disc_weight=0.8`, `codebook_weight=1.0`). |
+| 4  | No Stage 0 LPIPS                                        | **Added** LPIPS (VGG) with `perceptual_weight=1.0`. Falls back to torchmetrics or a feature-MSE placeholder. |
+| 5  | Taming-style ResBlock + bottleneck-attn encoder/decoder | **Replaced** with `content_enc_builder` / `dec_builder` InstanceNorm conv stack (`1→32→64→128→256`).      |
+| 6  | `base_channels=64`                                      | **Changed** to `base_channels=32` (official `C=32`).                                                    |
+| 8  | Transformer 6 blocks                                    | **Changed** to **15 self-attn-only blocks** (`generator.py:51`).                                        |
+| 8b | Transformer in-block cross-attn                         | **Moved** cross-attn BEFORE the stack via explicit K/Q/V Linears (`read_decode`).                       |
+| 10 | mlp_ratio=4.0                                           | **Changed** to mlp_ratio=2.0 (`dim_mlp=512` against `embed_dim=256`).                                   |
+| 12 | 14 structure classes (12 + atomic + unknown)            | **Reduced** to 13 (0..12 per `meta/stru_all.json`).                                                     |
+| 13 | SSEM = CE on auxiliary `StructureHead`                  | **Removed** — SSEM is now parameter-free spatial recalibration of the cross-attn map.                   |
+| 14 | SSEM injection = additive bias + prefix token           | **Replaced** with `RegionAttentionRecalibrator` (hand-coded class spatial templates).                   |
+| 15 | λ_struct = 0.1 → 0.2 → 0.3 ramp                         | **Dropped** — no structure CE term anymore.                                                             |
+| 17 | Stage A 300k iters                                      | **Bumped** to 1.5M (official `cfgs/custom.yaml:17`).                                                    |
+| 19 | AdamW(0.9, 0.999)                                       | **Changed** to `Adam(0.5, 0.9)` for Stage 0 G/D, `Adam(0.0, 0.9)` for Stage 1.                          |
+| 22 | Full VQGAN freeze at Stage 1+                           | **Replaced** with partial freeze: first 3 decoder ResBlocks + `post_quant` stay trainable.              |
+
+Decisions retained as-is: 1 (codebook size 1024), 2 (VectorQuantize β=0.25),
+7 (8 heads), 9 (3 refs), 11 (bidirectional decode), 16 (Stage 0 lr — now
+defaults to `4.5e-6` per official YAML; the original `4e-5` is still
+honoured if set), 18 (Stages B/C anneal defaults), 20 (grad clip 1.0),
+21 (no EMA), 23-26 (tooling).
+
 ## Verification commands run
 
 From `papers/04_vq_font/`:
@@ -245,3 +281,36 @@ uv run python -m paper_reimpl_shared.runner.entrypoint \
 uv lock
 # -> Resolved 46 packages.
 ```
+
+## Phase 2 verification commands
+
+After the github-diff rewrite (current code state):
+
+```
+ruff check src/ tests/                            # All checks passed!
+pytest tests/test_smoke.py -x -v                  # 5 passed in <1s
+
+python -m paper_reimpl_shared.runner.entrypoint \
+    --paper vq_font --dry-run --synthetic --device cpu \
+    --train src/vq_font/configs/train_stage_0_vqgan.yaml \
+    --model src/vq_font/configs/model.yaml \
+    --data src/vq_font/configs/data_stage_0_vqgan.yaml \
+    --data-backend mac_symlink
+# -> step=0 loss=1.1276 recon=0.9337 vq=0.1939; finite
+# (simple_loss=True via --dry-run, so VQLPIPSWithDiscriminator is bypassed.)
+
+python -m paper_reimpl_shared.runner.entrypoint \
+    --paper vq_font --dry-run --synthetic --device cpu \
+    --train src/vq_font/configs/train_stage_a_ttf.yaml \
+    --model src/vq_font/configs/model.yaml \
+    --data src/vq_font/configs/data_stage_a.yaml \
+    --data-backend mac_symlink
+# -> step=0 loss=7.0031 token_ce=7.0031 top1=0.00%; finite (~log(1024)=6.93)
+# Now using 15-self-attn block transformer + parameter-free SSEM,
+# partial-freeze VQGAN, Adam(betas=(0.0, 0.9)).
+```
+
+New smoke tests added (5 total): `test_vqgan_stage_smoke`,
+`test_vqgan_full_loss_smoke` (VQLPIPS+Discriminator G+D step),
+`test_transformer_stage_smoke` (partial-freeze param-set check),
+`test_transformer_full_freeze_legacy_smoke`, `test_sample_pipeline`.

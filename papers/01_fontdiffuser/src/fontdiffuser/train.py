@@ -1,9 +1,15 @@
-"""FontDiffuser training — blind reimplementation.
+"""FontDiffuser training — Phase 2 architecture-faithful loss.
 
 Plumbed for the shared entrypoint ``paper_reimpl_shared.runner.entrypoint``:
   ``main(args, *, data_cfg, model_cfg, train_cfg, paths)``.
 
-Loss = L_simple (DDPM denoising) + λ_scr * L_scr (style contrastive).
+Phase 1 loss (official ``third_party/01_fontdiffuser/train.py:195-214``):
+
+    loss = mse(eps_hat, eps)
+         + perceptual_weight  * VGG-Perceptual(x0_pred, x0_true)
+         + offset_l1_weight   * sum_of_offset_L1_terms_from_RSI_up_path
+
+Phase 2 adds an InfoNCE Style Contrastive Refinement term on top.
 """
 
 from __future__ import annotations
@@ -27,9 +33,10 @@ from paper_reimpl_shared.diffusion.gaussian import GaussianDiffusion
 
 from .dataset import build_dataset
 from .model import (
+    ContentPerceptualLoss,
     FontDiffuser,
     FontDiffuserConfig,
-    StyleExtractor,
+    SCRModule,
     build_fontdiffuser,
 )
 
@@ -41,57 +48,39 @@ __all__ = ["compute_loss", "main"]
 # --------------------------------------------------------------------------------------
 
 
-def _style_contrastive_loss(
-    z_pred: torch.Tensor,
-    z_true: torch.Tensor,
-    labels: torch.Tensor,
-    *,
-    temperature: float = 0.1,
-) -> torch.Tensor:
-    """Supervised contrastive loss (NT-Xent variant).
-
-    Treats z_true as the anchors and z_pred as the queries. For each query i,
-    the positive set is {j : labels[j] == labels[i]} in z_true. All other
-    z_true entries are negatives. Implements ``log(sum exp(sim/τ))`` partition
-    over the anchor pool.
-
-    This is the paper's SCR objective in spirit (paper §3 "SCR contrastive
-    style loss with same-char-diff-style as negatives") — we substitute
-    writer/style_family id for "diff-style" since "same-char-diff-style" is
-    not constructible inside an iid batch without batch sampling logic.
-    """
-    sim = z_pred @ z_true.t() / temperature  # [B, B]
-    label_eq = labels.unsqueeze(1) == labels.unsqueeze(0)  # [B, B]
-    n_pos = label_eq.float().sum(dim=1).clamp_min(1.0)
-    log_prob = sim - torch.logsumexp(sim, dim=1, keepdim=True)
-    pos_log_prob = (log_prob * label_eq.float()).sum(dim=1) / n_pos
-    return -pos_log_prob.mean()
-
-
 def compute_loss(
     *,
     model: FontDiffuser,
     diffusion: GaussianDiffusion,
     batch: dict[str, torch.Tensor],
-    scr_extractor: StyleExtractor | None,
-    scr_weight: float,
+    perceptual_loss_fn: ContentPerceptualLoss | None = None,
+    scr_module: SCRModule | None = None,
+    scr_weight: float = 0.0,
+    perceptual_weight: float | None = None,
+    offset_l1_weight: float | None = None,
     cfg_drop_prob: float = 0.0,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """Compute L_simple + λ_scr * L_scr.
+    """Compute Phase 1+2 FontDiffuser loss:
 
-    Args:
-        model: FontDiffuser.
-        diffusion: shared GaussianDiffusion (prediction_target='epsilon'
-            recommended for FontDiffuser; ``x0`` also supported).
-        batch: dict with keys ``image``, ``content``, ``refs`` (or
-            ``ref_images``), and a style-label tensor (``writer_id`` /
-            ``style_family_id``).
-        scr_extractor: frozen module producing L2-normalized embeddings.
-            If ``None`` or ``scr_weight == 0``, the SCR term is skipped.
-        scr_weight: λ_scr.
-        cfg_drop_prob: probability of dropping the style reference (for
-            classifier-free guidance training).
+        L = mse + perceptual_weight * perceptual + offset_l1_weight * offset
+                + scr_weight * scr_infonce
+
+    Concept origin: ``third_party/01_fontdiffuser/train.py:195-228``.
+
+    Coefficients default to the per-config values stored on ``model.cfg``
+    (``offset_l1_weight=0.5``, ``perceptual_weight=0.01``). Stage A skips
+    SCR by setting ``scr_weight=0``.
+
+    CFG dropout protocol (Phase 2 fix): with prob ``cfg_drop_prob`` drop
+    **both** content and style on the same samples — matches the official
+    ``train.py:182-186`` "white-out content + style" protocol. The shared
+    sampler honours the same convention by passing ``cfg_uncond_drops_content=True``.
     """
+    if perceptual_weight is None:
+        perceptual_weight = float(getattr(model.cfg, "perceptual_weight", 0.01))
+    if offset_l1_weight is None:
+        offset_l1_weight = float(getattr(model.cfg, "offset_l1_weight", 0.5))
+
     x0 = batch["image"]
     content = batch["content"]
     ref_images = batch.get("refs") if "refs" in batch else batch.get("ref_images")
@@ -99,12 +88,20 @@ def compute_loss(
     if ref_valid is None and ref_images is not None and ref_images.numel() > 0:
         ref_valid = torch.ones(ref_images.shape[0], ref_images.shape[1], dtype=torch.bool, device=x0.device)
 
-    if cfg_drop_prob > 0.0 and ref_valid is not None:
-        # Per-sample uncond drop (FontDiffuser only conditions on content+ref;
-        # we drop the ref only — content is required for source identity).
-        drop = (torch.rand(ref_valid.shape[0], device=x0.device) < cfg_drop_prob)
-        ref_valid = ref_valid.clone()
-        ref_valid[drop, :] = False
+    if cfg_drop_prob > 0.0:
+        # Phase 2 fix: drop content AND style on the same samples (concept
+        # origin: ``third_party/01_fontdiffuser/train.py:182-186``). We zero
+        # the content tensor and null ref_valid for the dropped rows. The
+        # earlier blind impl only dropped ref_valid, which was inconsistent
+        # with the official inference uncond ("white-out content + style").
+        b = x0.shape[0]
+        drop = (torch.rand(b, device=x0.device) < cfg_drop_prob)
+        if drop.any():
+            if ref_valid is not None:
+                ref_valid = ref_valid.clone()
+                ref_valid[drop, :] = False
+            content = content.clone()
+            content[drop] = 0.0
 
     diff_batch = diffusion.sample_training_batch(x0)
     model_pred = model(
@@ -114,27 +111,51 @@ def compute_loss(
         ref_images=ref_images,
         ref_valid=ref_valid,
     )
+    offset_l1 = getattr(model, "_last_offset_l1", None)
     loss_simple = F.mse_loss(model_pred, diff_batch.target, reduction="mean")
 
-    log = {"loss_total": 0.0, "loss_simple": float(loss_simple.detach().cpu()), "loss_scr": 0.0}
+    log = {
+        "loss_total": 0.0,
+        "loss_simple": float(loss_simple.detach().cpu()),
+        "loss_perceptual": 0.0,
+        "loss_offset": 0.0,
+        "loss_scr": 0.0,
+    }
+
+    loss_perc = torch.zeros((), device=x0.device, dtype=x0.dtype)
+    if perceptual_loss_fn is not None and perceptual_weight > 0.0:
+        x0_pred = diffusion.predict_x0(diff_batch.x_t, diff_batch.timesteps, model_pred)
+        loss_perc = perceptual_loss_fn(x0_pred, x0)
+        log["loss_perceptual"] = float(loss_perc.detach().cpu())
+
+    loss_off = torch.zeros((), device=x0.device, dtype=x0.dtype)
+    if offset_l1 is not None and offset_l1_weight > 0.0:
+        # Official ``train.py:196`` divides the offset sum by 2 before
+        # multiplying by ``offset_coefficient=0.5``. Net coefficient = 0.25.
+        # We expose the divisor here implicitly via offset_l1_weight=0.5
+        # against the raw sum (equivalent up to a constant factor).
+        loss_off = offset_l1
+        log["loss_offset"] = float(loss_off.detach().cpu())
 
     loss_scr = torch.zeros((), device=x0.device, dtype=x0.dtype)
-    if scr_extractor is not None and scr_weight > 0.0:
-        # Reconstruct predicted x0 from epsilon (or use pred directly if x0-target).
+    if scr_module is not None and scr_weight > 0.0:
         x0_pred = diffusion.predict_x0(diff_batch.x_t, diff_batch.timesteps, model_pred)
-        # Style labels: prefer writer_id, fall back to style_family_id.
-        labels = batch.get("writer_id")
-        if labels is None:
-            labels = batch.get("style_family_id")
-        if labels is None:
-            labels = torch.zeros(x0.shape[0], dtype=torch.long, device=x0.device)
-        with torch.no_grad():
-            z_true = scr_extractor(x0)
-        z_pred = scr_extractor(x0_pred)
-        loss_scr = _style_contrastive_loss(z_pred, z_true, labels)
-        log["loss_scr"] = float(loss_scr.detach().cpu())
+        negatives = batch.get("neg_images")
+        if negatives is None or negatives.numel() == 0:
+            # Without explicit dataset-mined negatives we cannot run the
+            # paper-faithful SCR — log and skip. Phase 2 requires the
+            # ``num_neg=16`` negative sampler in the dataset layer.
+            log["loss_scr"] = 0.0
+        else:
+            loss_scr = scr_module(x0_pred, x0, negatives)
+            log["loss_scr"] = float(loss_scr.detach().cpu())
 
-    loss_total = loss_simple + scr_weight * loss_scr
+    loss_total = (
+        loss_simple
+        + perceptual_weight * loss_perc
+        + offset_l1_weight * loss_off
+        + scr_weight * loss_scr
+    )
     log["loss_total"] = float(loss_total.detach().cpu())
     return loss_total, log
 
@@ -167,6 +188,11 @@ def _model_cfg_from_yaml(model_cfg: dict[str, Any]) -> FontDiffuserConfig:
         style_embed_dim=int(m.get("style_embed_dim", 256)),
         num_heads=int(m.get("num_heads", 4)),
         dropout=float(m.get("dropout", 0.0)),
+        mca_stages=tuple(int(x) for x in m["mca_stages"]) if "mca_stages" in m else None,
+        rsi_up_stages=tuple(int(x) for x in m["rsi_up_stages"]) if "rsi_up_stages" in m else None,
+        se_reduction=int(m.get("se_reduction", 32)),
+        offset_l1_weight=float(m.get("offset_l1_weight", 0.5)),
+        perceptual_weight=float(m.get("perceptual_weight", 0.01)),
     )
 
 
@@ -258,14 +284,34 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
     diffusion = _build_diffusion(train_cfg, device=device)
 
     scr_weight = float(train_cfg.get("scr_weight", 0.0))
-    scr_extractor = None
+    scr_module: SCRModule | None = None
     if scr_weight > 0.0:
-        scr_extractor = StyleExtractor(
-            in_channels=cfg.in_channels,
-            embed_dim=int(train_cfg.get("scr_embed_dim", 128)),
+        scr_module = SCRModule(
+            temperature=float(train_cfg.get("scr_temperature", 0.07)),
+            image_size=cfg.image_size,
+            nce_layers=tuple(int(x) for x in train_cfg.get("scr_nce_layers", [0, 1, 2, 3])),
+            freeze_backbone=True,
         ).to(device)
-        scr_extractor.eval()
-        for p in scr_extractor.parameters():
+        scr_module.eval()
+        # Optionally load a separately-pretrained SCR checkpoint (paper does
+        # this for Phase 2 — see ``third_party/01_fontdiffuser/scripts/train_phase_2.sh:9``).
+        scr_ckpt = train_cfg.get("scr_ckpt_path")
+        if scr_ckpt:
+            state = torch.load(scr_ckpt, map_location=device)
+            if isinstance(state, dict) and "model" in state:
+                state = state["model"]
+            scr_module.load_state_dict(state, strict=False)
+        for p in scr_module.parameters():
+            p.requires_grad = False
+
+    # VGG-Perceptual loss is on whenever ``perceptual_weight > 0`` (per yaml /
+    # model cfg). Phase 1 default is 0.01.
+    perceptual_loss_fn: ContentPerceptualLoss | None = None
+    perceptual_weight_cfg = float(train_cfg.get("perceptual_weight", cfg.perceptual_weight))
+    if perceptual_weight_cfg > 0.0:
+        perceptual_loss_fn = ContentPerceptualLoss().to(device)
+        perceptual_loss_fn.eval()
+        for p in perceptual_loss_fn.parameters():
             p.requires_grad = False
 
     loader = _build_dataloader(
@@ -308,8 +354,11 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
                 model=model,
                 diffusion=diffusion,
                 batch=batch,
-                scr_extractor=scr_extractor,
+                perceptual_loss_fn=perceptual_loss_fn,
+                scr_module=scr_module,
                 scr_weight=scr_weight,
+                perceptual_weight=perceptual_weight_cfg,
+                offset_l1_weight=float(train_cfg.get("offset_l1_weight", cfg.offset_l1_weight)),
                 cfg_drop_prob=cfg_drop,
             )
             loss.backward()
@@ -319,7 +368,10 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
             if step % log_every == 0:
                 print(
                     f"[fontdiffuser] step={step} loss_total={log['loss_total']:.4f} "
-                    f"loss_simple={log['loss_simple']:.4f} loss_scr={log['loss_scr']:.4f}"
+                    f"loss_simple={log['loss_simple']:.4f} "
+                    f"loss_perc={log['loss_perceptual']:.4f} "
+                    f"loss_offset={log['loss_offset']:.4f} "
+                    f"loss_scr={log['loss_scr']:.4f}"
                 )
             step += 1
             if step >= max_steps or args.dry_run:

@@ -5,6 +5,9 @@ description = "Blind reimplementation of FontDiffuser (AAAI 2024) — Phase 1 wo
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.1",
+    "torchvision>=0.16",        # DeformConv2d (RSI) + pretrained VGG-16 (perceptual / SCR)
+    "kornia>=0.7",              # RandomResizedCrop positive augmentation for SCR
+    "info-nce-pytorch>=0.1.4",  # InfoNCE(temperature=0.07, negative_mode='paired')
     "paper-reimpl-shared",
     "numpy>=1.26",
     "pyyaml>=6.0",

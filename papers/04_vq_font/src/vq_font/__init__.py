@@ -13,8 +13,7 @@ from .dataset import (
 )
 from .model import (
     NUM_STRUCTURE_CLASSES,
-    StructureEncoder,
-    StructureHead,
+    RegionAttentionRecalibrator,
     TokenPriorTransformer,
     TransformerConfig,
     VQFont,
@@ -35,8 +34,7 @@ __all__ = [
     # configs / classes
     "NUM_STRUCTURE_CLASSES",
     "STRUCTURE_NAME_TO_ID",
-    "StructureEncoder",
-    "StructureHead",
+    "RegionAttentionRecalibrator",
     "TokenPriorTransformer",
     "TransformerConfig",
     "VQFont",

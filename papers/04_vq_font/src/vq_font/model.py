@@ -1,24 +1,29 @@
 """Top-level VQ-Font composite model.
 
-VQ-Font is a two-stage system: Stage 0 trains a VQGAN font codebook end-to-end
-(`vqgan.VQGAN`), and Stage 1+ trains a Transformer that refines token indices
-against the frozen codebook (`transformer.TokenPriorTransformer`).
-
-This module exposes both pieces in one place so train.py / sample.py / tests
-can do a single ``from vq_font.model import build_vq_font``.
+Phase 2 changes vs blind-impl
+-----------------------------
+* Drop ``StructureEncoder`` / ``StructureHead`` (now ``[blind-impl-divergence]``
+  rather than ``[paper-cited]``). SSEM is now the parameter-free
+  ``RegionAttentionRecalibrator`` inside ``TokenPriorTransformer``.
+* ``freeze_vqgan=True`` now applies a **partial freeze** matching
+  ``generator.py:40-49``: encoder + codebook + late decoder are frozen,
+  the first three decoder ``ResBlock`` ``conv1/conv2`` weights stay
+  trainable along with ``post_quant`` (= official ``post_quant_conv``).
+  Pass ``freeze_vqgan='full'`` for the strict blind-impl behaviour
+  (everything frozen) — kept so legacy tests still pass.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 import torch.nn as nn
 
 from .transformer import (
     NUM_STRUCTURE_CLASSES,
-    StructureEncoder,
-    StructureHead,
+    RegionAttentionRecalibrator,
     TokenPriorTransformer,
     TransformerConfig,
     build_transformer,
@@ -33,8 +38,7 @@ from .vqgan import (
 
 __all__ = [
     "NUM_STRUCTURE_CLASSES",
-    "StructureEncoder",
-    "StructureHead",
+    "RegionAttentionRecalibrator",
     "TokenPriorTransformer",
     "TransformerConfig",
     "VQGAN",
@@ -47,6 +51,9 @@ __all__ = [
     "build_vq_font",
     "build_vqgan",
 ]
+
+
+FreezeMode = Literal["partial", "full", "none"]
 
 
 @dataclass
@@ -70,8 +77,6 @@ class VQFontConfig:
                 "VQFontConfig: transformer.embed_dim must equal vqgan.embed_dim; "
                 f"got {self.transformer.embed_dim} vs {self.vqgan.embed_dim}"
             )
-        # Catch latent-grid mismatches at config-build time so a forward-pass
-        # shape error doesn't surprise us mid-training.
         vqgan_latent = self.vqgan.out_resolution()
         if self.transformer.latent_resolution != vqgan_latent:
             raise ValueError(
@@ -83,32 +88,113 @@ class VQFontConfig:
 
 
 class VQFont(nn.Module):
-    """Stage-1+ composite: frozen VQGAN + trainable Transformer.
+    """Stage-1+ composite: (partially) frozen VQGAN + trainable Transformer.
 
-    The VQGAN can be wired as ``frozen=True`` (Stage 1+ paper recipe) or
-    ``frozen=False`` (Stage 0 still trainable). The Transformer is always
-    trainable. The class deliberately keeps both pieces exposed as attributes
-    so external code can do parameter-group splits (e.g. AdamW different lrs).
+    Freeze policy is selected via the ``freeze_vqgan`` keyword on the
+    constructor:
+
+    * ``'partial'`` (default, paper-faithful, ``generator.py:40-49``):
+      freeze everything in VQGAN except the first three decoder
+      ``ResBlock`` ``conv1.conv``/``conv2.conv`` weights (parameter names
+      ``decoder.res_blocks.{0,1,2}.conv1.conv.*`` and ``.conv2.conv.*``)
+      and the ``post_quant`` projection. These are the "early decoder
+      layers + post_quant_conv" that the official code keeps trainable.
+    * ``'full'``: everything in VQGAN frozen (blind-impl behaviour, kept
+      for the legacy smoke test).
+    * ``'none'``: nothing frozen — used by Stage 0.
+
+    ``True`` (legacy bool) maps to ``'partial'``; ``False`` maps to ``'none'``.
     """
 
-    def __init__(self, cfg: VQFontConfig, *, freeze_vqgan: bool = True) -> None:
+    # Set of parameter-name suffixes that stay trainable under 'partial' freeze.
+    # We match the official intent ("first three decoder ResBlock convs + post_quant_conv")
+    # in our updated layer naming (``decoder.res_blocks.{0,1,2}.conv{1,2}.conv.{weight,bias}``).
+    _PARTIAL_FREEZE_TRAINABLE_PATTERNS: tuple[str, ...] = (
+        "decoder.res_blocks.0.conv1.conv.weight",
+        "decoder.res_blocks.0.conv1.conv.bias",
+        "decoder.res_blocks.0.conv2.conv.weight",
+        "decoder.res_blocks.0.conv2.conv.bias",
+        "decoder.res_blocks.1.conv1.conv.weight",
+        "decoder.res_blocks.1.conv1.conv.bias",
+        "decoder.res_blocks.1.conv2.conv.weight",
+        "decoder.res_blocks.1.conv2.conv.bias",
+        "decoder.res_blocks.2.conv1.conv.weight",
+        "decoder.res_blocks.2.conv1.conv.bias",
+        "decoder.res_blocks.2.conv2.conv.weight",
+        "decoder.res_blocks.2.conv2.conv.bias",
+        "post_quant.weight",
+        "post_quant.bias",
+    )
+
+    def __init__(self, cfg: VQFontConfig, *, freeze_vqgan: FreezeMode | bool = "partial") -> None:
         super().__init__()
         self.cfg = cfg
         self.vqgan = build_vqgan(cfg.vqgan)
         self.transformer = build_transformer(cfg.transformer)
-        if freeze_vqgan:
-            self._freeze_vqgan()
+
+        # Resolve legacy bool API.
+        if freeze_vqgan is True:
+            mode: FreezeMode = "partial"
+        elif freeze_vqgan is False:
+            mode = "none"
+        else:
+            mode = freeze_vqgan
+        self.freeze_mode: FreezeMode = mode
+        self._apply_freeze(mode)
+
+    def _apply_freeze(self, mode: FreezeMode) -> None:
+        if mode == "none":
+            for p in self.vqgan.parameters():
+                p.requires_grad = True
+            self.vqgan.train()
+            return
+        if mode == "full":
+            for p in self.vqgan.parameters():
+                p.requires_grad = False
+            self.vqgan.eval()
+            return
+        if mode == "partial":
+            trainable_patterns = set(self._PARTIAL_FREEZE_TRAINABLE_PATTERNS)
+            actual_names = {n for n, _ in self.vqgan.named_parameters()}
+            # Only enable patterns that actually exist in this VQGAN
+            # topology — keeps tiny / smoke configs working when they have
+            # fewer than 3 decoder ResBlocks or an Identity post_quant.
+            self._partial_trainable: set[str] = trainable_patterns & actual_names
+            any_trainable = False
+            for name, p in self.vqgan.named_parameters():
+                if name in self._partial_trainable:
+                    p.requires_grad = True
+                    any_trainable = True
+                else:
+                    p.requires_grad = False
+            if not any_trainable:
+                raise RuntimeError(
+                    "VQFont partial freeze matched zero parameters in the "
+                    "current VQGAN topology. Expected at least one of: "
+                    f"{sorted(trainable_patterns)}. Actual names start with: "
+                    f"{sorted(list(actual_names))[:6]} ..."
+                )
+            self.vqgan.eval()  # InstanceNorm doesn't track stats so this is safe
+            return
+        raise ValueError(f"Unknown freeze_vqgan mode: {mode!r}")
 
     def _freeze_vqgan(self) -> None:
-        for p in self.vqgan.parameters():
-            p.requires_grad = False
-        self.vqgan.eval()
+        """Legacy alias: full freeze (kept for backward compatibility)."""
+        self._apply_freeze("full")
 
-    @torch.no_grad()
     def _vqgan_encode(self, x: torch.Tensor) -> torch.Tensor:
-        """Run VQGAN encoder + pre_quant projection, returning continuous features."""
-        z_e = self.vqgan.pre_quant(self.vqgan.encoder(x))
-        return z_e
+        """Run VQGAN encoder + pre_quant projection.
+
+        Returns the continuous pre-quantization features. ``no_grad`` is
+        applied when VQGAN is in ``full`` freeze mode; under ``partial`` we
+        still need grad to flow into the trainable encoder params, even
+        though by default the encoder is frozen — keeping the path
+        differentiable is safer.
+        """
+        if self.freeze_mode == "full":
+            with torch.no_grad():
+                return self.vqgan.pre_quant(self.vqgan.encoder(x))
+        return self.vqgan.pre_quant(self.vqgan.encoder(x))
 
     @torch.no_grad()
     def encode_target_indices(self, target_image: torch.Tensor) -> torch.Tensor:
@@ -122,7 +208,7 @@ class VQFont(nn.Module):
         structure_id: torch.Tensor,
         ref_valid: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Produce per-token codebook logits + SSEM structure logits.
+        """Produce per-token codebook logits + the post-SSEM attention map.
 
         Args:
             initial_glyph: [B, C, H, W] initial synthesized glyph (from any
@@ -130,11 +216,11 @@ class VQFont(nn.Module):
                 source/content image as a stand-in if no synthesis module
                 checkpoint is loaded.
             ref_glyphs:    [B, R, C, H, W] R reference glyphs.
-            structure_id:  [B] long ids into the 14-way structure vocab.
+            structure_id:  [B] long structure class id (0..N-1).
             ref_valid:     [B, R] bool optional mask.
 
         Returns:
-            (token_logits [B, N, K], structure_logits [B, num_structures]).
+            (token_logits [B, N, K], attn_map [B, heads, N, R*N]).
         """
         b, r, c, h, w = ref_glyphs.shape
         q_feat = self._vqgan_encode(initial_glyph)
@@ -155,9 +241,9 @@ class VQFont(nn.Module):
         structure_id: torch.Tensor,
         ref_valid: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Convenience wrapper around `predict_token_logits`."""
+        """Convenience wrapper around ``predict_token_logits``."""
         return self.predict_token_logits(initial_glyph, ref_glyphs, structure_id, ref_valid=ref_valid)
 
 
-def build_vq_font(cfg: VQFontConfig, *, freeze_vqgan: bool = True) -> VQFont:
+def build_vq_font(cfg: VQFontConfig, *, freeze_vqgan: FreezeMode | bool = "partial") -> VQFont:
     return VQFont(cfg, freeze_vqgan=freeze_vqgan)

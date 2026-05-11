@@ -1,35 +1,61 @@
-"""IF-Font — blind reimplementation.
+"""IF-Font — Phase 2 corrected implementation.
 
-Architecture (paper-cited, p.1 / training-config block):
-  1. VQ tokenizer (VQGAN-style): conv encoder + EMA-updated codebook + conv decoder.
-       - codebook size = 256
-       - downsample factor = 8  (e.g. 128×128 image → 16×16 token grid → 256 tokens)
-  2. IDS text encoder: embedding table over (IDC chars + leaf components +
-     special tokens). A small Transformer encoder adds context.
-  3. Reference VQ encoder: reuses the same VQ encoder + codebook to map each
-     reference glyph to its codebook token grid (one ref → 256 tokens).
-  4. Autoregressive Transformer decoder:
-       - 10 blocks
-       - 8 attention heads
-       - feature dim = 384
-       - each block: 2 self-attn (causal over target tokens) + 1 cross-attn
-         over the concatenated context = [IDS_tokens ; ref_tokens].
-       - predicts target VQ token id at every position (cross-entropy).
-  5. Inference: AR sample tokens, then VQ decoder produces the image.
+Architecture (after Phase 2 alignment to official Stareven233/IF-Font):
 
-Adapter notes for the shared smoke-test contract:
-  IF-Font does NOT use the shared GaussianDiffusion (it's autoregressive, not
-  diffusion). The compute_loss function in `train.py` reads ``image``,
-  ``refs`` / ``ref_images``, and optional explicit ``ids_token_ids`` /
-  ``ids_attention_mask`` from the batch dict. When IDS tensors are absent
-  (synthetic smoke batches), we fall back to a derived stub IDS sequence
-  built from ``char_id`` modulo the IDS tokenizer vocab so the conditioning
-  path still receives a finite, gradient-carrying signal.
+  1. VQ tokenizer **frozen pretrained** CompVis ``vq-f8-n256`` (NOT trained
+     from scratch). The blind Phase 1 trained its own VQGAN with embed_dim=256,
+     grayscale, MSE-only loss — `reports/github_diff.md` items A2/D5/P0 #2 #7.
+     We now expose a `VQTokenizerAdapter` that:
+       * Defaults to RGB (in_channels=3), latent embed_dim=4, codebook 256,
+         downsample 8 — the exact shape of the pretrained CompVis model.
+       * Is **frozen** at construction: ``requires_grad_(False)`` + ``.eval()``.
+       * For smoke / CI we instantiate a randomly-initialised tokenizer with
+         the correct shapes; loading the real pretrained weights (via
+         taming-transformers) is done outside this file by passing the
+         already-frozen `nn.Module` in.
+       * Provides ``encode(image)``, ``lookup(indices)``, ``decode_indices``.
+     There is no Stage A VQGAN pretraining — VQ is fixed external state.
+
+  2. **IDS encoder = bare `nn.Embedding` + a second `nn.Embedding`** (the
+     dual-table design from official `encoder.py:191-192`). The previous
+     full Transformer encoder is gone (over-engineered; A5 in github_diff).
+     `embedding` feeds the AR prefix; `embedding2` feeds the 3SA cross-attn.
+
+  3. **StyleEncoder + 3SA**: a CNN stem over each ref's quantised latent
+     ([B*N, 4, 16, 16] → [B*N, c, 16, 16]), then a coverage-weighted average
+     across the N refs (`x_g`) plus an IDS-conditioned cross-attention block
+     (`_structure_style_aggregation`) that yields `x_l`. The final style
+     sequence is `cat([x_l, x_g], dim=1)`.
+
+  4. **MoCo wrapper**: two StyleEncoders (query + momentum-updated key),
+     a 2-MLP projector + predictor head over `x_g`. Produces both `x_sss`
+     (the style sequence for the AR decoder) and `cl` (the contrastive
+     features for sup_cl loss). Official `encoder.MoCoWrapper`.
+
+  5. **AR Transformer decoder**: 10 blocks · 8 heads · d_model 384. Each block
+     = **1 self-attn + 1 cross-attn + 1 FFN** (NOT 2+1 as the paper note
+     claimed). Pre-LN. Per-head QK-LayerNorm. The decoder consumes
+     `x_sss` as cross-attn K/V and the IDS embedding as a **prefix prepended
+     to the target token sequence** (per official `nanogpt.py:241`). Weight
+     tying between `wte` and `lm_head`.
+
+Conditioning summary (official-aligned):
+  * IDS prefix-prepended to AR target embeddings; sliced off the logits tail
+    so CE only contributes from the image-token positions.
+  * Style sequence `x_sss = cat([x_l, x_g])` is the cross-attn K/V.
+  * No CFG (the paper does not use it).
+
+Losses (training):
+  * `losses.sq` — cross-entropy on next VQ token (target = quantised target
+    glyph indices).
+  * `losses.sup_cl` — supervised contrastive on style features keyed by
+    font_id / writer_id.
 """
 
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass, field
 
 import torch
@@ -37,50 +63,34 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # ======================================================================
-# VQ tokenizer (VQGAN-like)
+# VQ tokenizer adapter (frozen pretrained CompVis vq-f8-n256)
 # ======================================================================
 
 
 @dataclass
 class VQTokenizerConfig:
-    """Hyperparameters for the VQGAN-style discrete tokenizer.
+    """Shape contract for the frozen VQGAN.
 
-    Defaults follow the paper's training-config block (note "訓練配置"):
+    Matches CompVis pretrained `vq-f8-n256`:
+      * image_size = 128 (RGB)
+      * in_channels = 3
+      * embedding_dim = 4   (NOT 256 — that was the blind Phase 1 mistake)
       * codebook_size = 256
-      * downsample factor = 8
-      * embedding_dim = 256 (paper does not specify; commonly = codebook_dim)
-
-    The codebook is EMA-updated (van den Oord 2017 / Esser 2021 style); this
-    keeps gradient flow through the encoder via the straight-through
-    estimator and avoids the dead-codebook pathology when batch is small.
+      * downsample factor = 8 → 16×16 = 256 tokens per glyph
     """
 
     image_size: int = 128
-    in_channels: int = 1
-    base_channels: int = 64
-    channel_mult: tuple[int, ...] = (1, 2, 2, 4)
-    """4 stages -> 3 downsamples -> factor 8 (paper-cited)."""
-    embedding_dim: int = 256
+    in_channels: int = 3
+    embedding_dim: int = 4
     codebook_size: int = 256
-    commitment_weight: float = 0.25
-    decay: float = 0.99
-    """EMA decay for codebook updates."""
-    eps: float = 1.0e-5
-
-    def stage_resolutions(self) -> list[int]:
-        sizes = [self.image_size]
-        for _ in range(len(self.channel_mult) - 1):
-            sizes.append(sizes[-1] // 2)
-        return sizes
+    downsample_factor: int = 8
 
     @property
     def token_grid_size(self) -> int:
-        """How many tokens along one spatial dim after the VQ encoder."""
-        return self.image_size // (2 ** (len(self.channel_mult) - 1))
+        return self.image_size // self.downsample_factor
 
     @property
     def n_tokens(self) -> int:
-        """Number of VQ tokens per glyph = (token_grid_size) ** 2."""
         return self.token_grid_size ** 2
 
 
@@ -91,260 +101,294 @@ def _gn(channels: int) -> nn.GroupNorm:
     return nn.GroupNorm(1, channels)
 
 
-class _ConvDown(nn.Module):
-    def __init__(self, in_c: int, out_c: int, *, stride: int) -> None:
+class _ResnetBlock(nn.Module):
+    def __init__(self, c_in: int, c_out: int) -> None:
         super().__init__()
-        self.body = nn.Sequential(
-            nn.Conv2d(in_c, out_c, 3, stride=stride, padding=1),
-            _gn(out_c),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(out_c, out_c, 3, stride=1, padding=1),
-            _gn(out_c),
-            nn.SiLU(inplace=True),
-        )
+        self.norm1 = _gn(c_in)
+        self.conv1 = nn.Conv2d(c_in, c_out, 3, padding=1)
+        self.norm2 = _gn(c_out)
+        self.conv2 = nn.Conv2d(c_out, c_out, 3, padding=1)
+        self.skip = nn.Conv2d(c_in, c_out, 1) if c_in != c_out else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.body(x)
+        h = self.conv1(F.silu(self.norm1(x)))
+        h = self.conv2(F.silu(self.norm2(h)))
+        return self.skip(x) + h
 
 
-class _ConvUp(nn.Module):
-    def __init__(self, in_c: int, out_c: int, *, upsample: bool) -> None:
-        super().__init__()
-        self.upsample = upsample
-        self.body = nn.Sequential(
-            nn.Conv2d(in_c, out_c, 3, padding=1),
-            _gn(out_c),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(out_c, out_c, 3, padding=1),
-            _gn(out_c),
-            nn.SiLU(inplace=True),
-        )
+class _StubVQGANEncoder(nn.Module):
+    """3-downsample CNN producing a [B, embed_dim, H/8, W/8] latent.
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.upsample:
-            x = F.interpolate(x, scale_factor=2, mode="nearest")
-        return self.body(x)
-
-
-class VQEncoder(nn.Module):
-    """CNN that maps glyph image → continuous latent grid [B, D, H/8, W/8]."""
+    This is NOT the real pretrained CompVis model — it is a shape-matching
+    stub used when running smoke tests or when the real pretrained weights
+    are unavailable. The real model can be substituted via
+    ``VQTokenizerAdapter.load_pretrained(vqgan_path)``.
+    """
 
     def __init__(self, cfg: VQTokenizerConfig) -> None:
         super().__init__()
-        chs = [cfg.base_channels * m for m in cfg.channel_mult]
-        layers: list[nn.Module] = [nn.Conv2d(cfg.in_channels, chs[0], 3, padding=1)]
-        prev = chs[0]
-        for i, c in enumerate(chs):
-            stride = 2 if i > 0 else 1
-            layers.append(_ConvDown(prev, c, stride=stride))
+        ch = (32, 64, 64, 64)
+        self.in_conv = nn.Conv2d(cfg.in_channels, ch[0], 3, padding=1)
+        layers: list[nn.Module] = []
+        prev = ch[0]
+        for c in ch[1:]:
+            layers.append(_ResnetBlock(prev, c))
+            layers.append(nn.Conv2d(c, c, 3, stride=2, padding=1))  # downsample
             prev = c
-        layers.append(nn.Conv2d(prev, cfg.embedding_dim, 1))
+        layers.append(_ResnetBlock(prev, prev))
         self.body = nn.Sequential(*layers)
+        self.out_norm = _gn(prev)
+        self.out_conv = nn.Conv2d(prev, cfg.embedding_dim, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.body(x)
+        x = self.in_conv(x)
+        x = self.body(x)
+        return self.out_conv(F.silu(self.out_norm(x)))
 
 
-class VQDecoder(nn.Module):
-    """Reverse-direction CNN: [B, D, H/8, W/8] → [B, C, H, W]."""
+class _StubVQGANDecoder(nn.Module):
+    """3-upsample CNN inverse of the stub encoder."""
 
     def __init__(self, cfg: VQTokenizerConfig) -> None:
         super().__init__()
-        chs = [cfg.base_channels * m for m in cfg.channel_mult]
-        layers: list[nn.Module] = [nn.Conv2d(cfg.embedding_dim, chs[-1], 3, padding=1)]
-        rev_chs = list(reversed(chs))
-        prev = rev_chs[0]
-        for i, c in enumerate(rev_chs):
-            # Upsample on every stage except the first to invert encoder's 3 strided downsamples.
-            up = i > 0
-            layers.append(_ConvUp(prev, c, upsample=up))
+        ch = (64, 64, 64, 32)
+        self.in_conv = nn.Conv2d(cfg.embedding_dim, ch[0], 3, padding=1)
+        layers: list[nn.Module] = []
+        prev = ch[0]
+        for c in ch[1:]:
+            layers.append(_ResnetBlock(prev, c))
+            layers.append(nn.Upsample(scale_factor=2, mode="nearest"))
             prev = c
-        layers.append(_gn(prev))
-        layers.append(nn.SiLU(inplace=True))
-        layers.append(nn.Conv2d(prev, cfg.in_channels, 3, padding=1))
+        layers.append(_ResnetBlock(prev, prev))
         self.body = nn.Sequential(*layers)
+        self.out_norm = _gn(prev)
+        self.out_conv = nn.Conv2d(prev, cfg.in_channels, 3, padding=1)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        return self.body(z)
+        z = self.in_conv(z)
+        z = self.body(z)
+        return self.out_conv(F.silu(self.out_norm(z)))
 
 
-class VectorQuantizer(nn.Module):
-    """EMA-updated discrete codebook with straight-through gradient.
+class VQTokenizerAdapter(nn.Module):
+    """Frozen pretrained-VQGAN tokenizer wrapper.
 
-    Reference: van den Oord 2017 + Esser 2021 (VQGAN).
-    Forward returns (quantized, indices, vq_loss) where:
-      * quantized: [B, D, H, W] — encoder output replaced by codebook entries.
-      * indices  : [B, H, W] long — codebook indices.
-      * vq_loss  : scalar — commitment loss (encoder is pushed toward codebook).
-    Codebook entries are updated via EMA, not gradient.
+    Public API (aligned with official `data.adapter.VQAdapter`):
+      * ``encode(image) -> indices [B, n_tokens]`` — codebook indices.
+      * ``lookup(indices) -> quantised [B, n_tokens, embed_dim]`` (flat) or
+        ``lookup_quant(indices) -> [B, embed_dim, H, W]`` (grid).
+      * ``decode_indices(indices) -> image [B, in_channels, H, W]``.
+      * ``get_codebook() -> [codebook_size, embed_dim]`` (no grad).
+
+    The adapter is frozen at construction:
+      * ``requires_grad_(False)`` on every submodule.
+      * ``self.train = lambda mode=True: self``  (override so Lightning's
+        ``model.train()`` does not re-enable BN/dropout training inside
+        the frozen tokenizer; matches official `adapter.py:54`).
+
+    The stub encoder/decoder used here have random weights — they exist so
+    the rest of the model has the correct latent shape for unit tests and
+    dry-runs. For real training, instantiate with
+    ``VQTokenizerAdapter.from_pretrained_compvis(vqgan_path)`` (requires
+    `taming-transformers`).
     """
 
-    def __init__(self, cfg: VQTokenizerConfig) -> None:
+    def __init__(self, cfg: VQTokenizerConfig | None = None) -> None:
         super().__init__()
-        self.cfg = cfg
-        self.codebook_size = cfg.codebook_size
-        self.embedding_dim = cfg.embedding_dim
-        self.decay = cfg.decay
-        self.eps = cfg.eps
-        self.commitment_weight = cfg.commitment_weight
-        # Runtime flag — when False, EMA codebook updates are skipped even in
-        # training mode. Train.py flips this to False in Stage B/C where the
-        # VQ is treated as a frozen tokenizer; otherwise the codebook would
-        # drift under the AR objective (a moving CE target on a fixed codebook
-        # = unstable training). Default True preserves Stage-A behaviour and
-        # the existing smoke tests.
-        self.update_codebook: bool = True
+        self.cfg = cfg or VQTokenizerConfig()
+        self.encoder = _StubVQGANEncoder(self.cfg)
+        self.decoder = _StubVQGANDecoder(self.cfg)
+        # Codebook as a buffer (not a Parameter) → never trained, never
+        # touched by EMA. Matches official `quantize.VectorQuantizer.embedding`
+        # except the latter is a Parameter; we use a buffer to make
+        # `requires_grad_(False)` watertight even if someone forgets the
+        # freeze step.
+        embed = torch.randn(self.cfg.codebook_size, self.cfg.embedding_dim) * 0.02
+        self.register_buffer("codebook", embed)
+        self._freeze()
 
-        # Codebook initialised from a small normal; EMA buffers track usage.
-        embed = torch.randn(cfg.codebook_size, cfg.embedding_dim) * 0.02
-        self.register_buffer("embedding", embed)
-        self.register_buffer("cluster_size", torch.zeros(cfg.codebook_size))
-        self.register_buffer("embed_avg", embed.clone())
+    # ------------------------------------------------------------------
+    # freezing
+    # ------------------------------------------------------------------
 
-    def _flatten_input(self, z: torch.Tensor) -> torch.Tensor:
-        # z: [B, D, H, W] -> [B*H*W, D]
-        b, d, h, w = z.shape
-        return z.permute(0, 2, 3, 1).reshape(-1, d), (b, h, w)
+    def _freeze(self) -> None:
+        for p in self.parameters():
+            p.requires_grad = False
+        self.eval()
+        # Override `.train()` so consumers that flip the parent model into
+        # train mode do not flip BN/dropout inside the tokenizer.
+        self.train = lambda mode=True: self  # type: ignore[method-assign]
 
-    def lookup(self, indices: torch.Tensor) -> torch.Tensor:
-        """indices: [B, ...] long → [B, ..., D]."""
-        return F.embedding(indices, self.embedding)
+    # ------------------------------------------------------------------
+    # codebook API
+    # ------------------------------------------------------------------
 
-    def forward(self, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        flat, (b, h, w) = self._flatten_input(z)
-        # Distance: ||z - e||^2 = ||z||^2 - 2 z.e + ||e||^2
-        dist = (
-            flat.pow(2).sum(dim=1, keepdim=True)
-            - 2 * flat @ self.embedding.t()
-            + self.embedding.pow(2).sum(dim=1, keepdim=False).unsqueeze(0)
-        )
-        indices_flat = dist.argmin(dim=1)  # [B*H*W]
-        indices = indices_flat.view(b, h, w)
-        quantized_flat = F.embedding(indices_flat, self.embedding)
-        quantized = quantized_flat.view(b, h, w, self.embedding_dim).permute(0, 3, 1, 2)
+    @property
+    def embedding_dim(self) -> int:
+        return self.cfg.embedding_dim
 
-        # EMA codebook update (only in training mode AND when not frozen).
-        if self.training and self.update_codebook:
-            with torch.no_grad():
-                onehot = F.one_hot(indices_flat, self.codebook_size).type_as(flat)  # [N, K]
-                cluster_size = onehot.sum(dim=0)  # [K]
-                self.cluster_size.mul_(self.decay).add_(cluster_size, alpha=1 - self.decay)
-                embed_sum = onehot.t() @ flat  # [K, D]
-                self.embed_avg.mul_(self.decay).add_(embed_sum, alpha=1 - self.decay)
-                n = self.cluster_size.sum()
-                cluster_size_norm = (
-                    (self.cluster_size + self.eps) / (n + self.codebook_size * self.eps) * n
-                )
-                self.embedding.copy_(self.embed_avg / cluster_size_norm.unsqueeze(1))
-
-        # Commitment loss: encoder must commit to chosen codebook entries.
-        # The codebook side is updated by EMA, so we detach there.
-        commitment = F.mse_loss(z, quantized.detach(), reduction="mean")
-        vq_loss = self.commitment_weight * commitment
-
-        # Straight-through estimator: pass encoder gradient through quantization.
-        quantized = z + (quantized - z).detach()
-        return quantized, indices, vq_loss
-
-
-class VQTokenizer(nn.Module):
-    """Composite: encoder + vector quantizer + decoder.
-
-    forward(image) → dict {
-        recon, indices, quantized, vq_loss, recon_loss
-    }
-    """
-
-    def __init__(self, cfg: VQTokenizerConfig) -> None:
-        super().__init__()
-        self.cfg = cfg
-        self.encoder = VQEncoder(cfg)
-        self.quantizer = VectorQuantizer(cfg)
-        self.decoder = VQDecoder(cfg)
+    @property
+    def codebook_size(self) -> int:
+        return self.cfg.codebook_size
 
     @property
     def n_tokens(self) -> int:
         return self.cfg.n_tokens
 
     @property
-    def codebook_size(self) -> int:
-        return self.cfg.codebook_size
+    def token_grid_size(self) -> int:
+        return self.cfg.token_grid_size
 
+    def get_codebook(self) -> torch.Tensor:
+        return self.codebook.detach()
+
+    # ------------------------------------------------------------------
+    # encode / decode
+    # ------------------------------------------------------------------
+
+    def _quantize(self, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        b, d, h, w = z.shape
+        flat = z.permute(0, 2, 3, 1).reshape(-1, d)
+        dist = (
+            flat.pow(2).sum(dim=1, keepdim=True)
+            - 2 * flat @ self.codebook.t()
+            + self.codebook.pow(2).sum(dim=1, keepdim=False).unsqueeze(0)
+        )
+        indices_flat = dist.argmin(dim=1)
+        indices = indices_flat.view(b, h, w)
+        quant_flat = F.embedding(indices_flat, self.codebook)
+        quant = quant_flat.view(b, h, w, d).permute(0, 3, 1, 2)
+        return quant, indices
+
+    @torch.no_grad()
     def encode(self, image: torch.Tensor) -> torch.Tensor:
-        """image: [B, C, H, W] → indices [B, n_tokens] (flattened grid)."""
+        """image [B, C, H, W] → indices [B, n_tokens]."""
         z = self.encoder(image)
-        _, indices, _ = self.quantizer(z)
-        return indices.flatten(1)  # [B, H*W]
+        _, indices = self._quantize(z)
+        return indices.flatten(1)
 
-    def encode_to_grid(self, image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        z = self.encoder(image)
-        return self.quantizer(z)
+    def lookup(self, indices: torch.Tensor) -> torch.Tensor:
+        """indices [B, ...] → embeddings [B, ..., embed_dim] (no grad path
+        beyond the embedding buffer, which is not a Parameter)."""
+        return F.embedding(indices, self.codebook)
 
-    def decode_indices(self, indices: torch.Tensor) -> torch.Tensor:
-        """indices: [B, n_tokens] → image [B, C, H, W]."""
+    def lookup_quant(self, indices: torch.Tensor) -> torch.Tensor:
+        """indices [B, n_tokens] → quant [B, embed_dim, H, W]."""
         b = indices.shape[0]
         grid = self.cfg.token_grid_size
-        embeds = self.quantizer.lookup(indices.view(b, grid, grid))  # [B, H, W, D]
-        z = embeds.permute(0, 3, 1, 2).contiguous()
-        return self.decoder(z)
+        embeds = self.lookup(indices.view(b, grid, grid))
+        return embeds.permute(0, 3, 1, 2).contiguous()
 
-    def forward(self, image: torch.Tensor) -> dict[str, torch.Tensor]:
+    @torch.no_grad()
+    def decode_indices(self, indices: torch.Tensor) -> torch.Tensor:
+        z = self.lookup_quant(indices)
+        return self.decoder(z).clamp(-1.0, 1.0)
+
+    @torch.no_grad()
+    def encode_to_grid(self, image: torch.Tensor):
+        """Compatibility shim for old API: (quant, indices, vq_loss=0)."""
         z = self.encoder(image)
-        quantized, indices, vq_loss = self.quantizer(z)
-        recon = self.decoder(quantized)
-        recon_loss = F.mse_loss(recon, image, reduction="mean")
-        return {
-            "recon": recon,
-            "indices": indices.flatten(1),
-            "quantized": quantized,
-            "vq_loss": vq_loss,
-            "recon_loss": recon_loss,
-        }
+        quant, indices = self._quantize(z)
+        zero = torch.zeros((), device=image.device)
+        return quant, indices, zero
+
+    # ------------------------------------------------------------------
+    # optional pretrained loader (heavy dep: taming-transformers)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_pretrained_compvis(cls, vqgan_path: str) -> VQTokenizerAdapter:
+        """Load the real CompVis vq-f8-n256 checkpoint via taming-transformers.
+
+        Expects `vqgan_path` to be a directory containing
+        ``configs/config.yaml`` and ``checkpoints/model.ckpt`` — same layout
+        official `VQAdapter` uses.
+        """
+        try:
+            from omegaconf import OmegaConf
+            from taming.models.vqgan import VQModel
+        except ImportError as e:  # pragma: no cover — heavy optional dep
+            raise ImportError(
+                "Loading the real pretrained VQGAN requires "
+                "`taming-transformers` and `omegaconf`. Install with: "
+                "`uv add taming-transformers omegaconf`."
+            ) from e
+        from pathlib import Path
+
+        path = Path(vqgan_path)
+        config = OmegaConf.load(path / "configs/config.yaml").model.params
+        sd = torch.load(path / "checkpoints/model.ckpt", map_location="cpu")["state_dict"]
+        model = VQModel(**config)
+        model.load_state_dict(sd, strict=False)
+        for p in model.parameters():
+            p.requires_grad = False
+        model.eval()
+
+        # Wrap the real VQModel in our adapter shell.
+        adapter = cls(
+            VQTokenizerConfig(
+                image_size=int(config.get("ddconfig", {}).get("resolution", 128)),
+                in_channels=int(config.get("ddconfig", {}).get("in_channels", 3)),
+                embedding_dim=int(config.get("embed_dim", 4)),
+                codebook_size=int(config.get("n_embed", 256)),
+                downsample_factor=8,
+            )
+        )
+        adapter.encoder = model  # type: ignore[assignment]
+        adapter.decoder = model  # type: ignore[assignment]
+        adapter._pretrained = model  # type: ignore[attr-defined]
+        adapter.codebook = model.quantize.embedding.weight.detach().clone()
+        adapter._freeze()
+        return adapter
+
+
+# Backwards-compatible aliases. The old VQTokenizer / VQEncoder / VQDecoder
+# names are kept so external scripts that import them keep working, but they
+# now point at the adapter shell.
+VQTokenizer = VQTokenizerAdapter
+VQEncoder = _StubVQGANEncoder
+VQDecoder = _StubVQGANDecoder
 
 
 # ======================================================================
-# Transformer AR decoder (10 blocks, 8 heads, dim=384 per paper)
+# Top-level config
 # ======================================================================
 
 
 @dataclass
 class IFFontConfig:
-    """All structural hyperparameters for IF-Font.
+    """All structural hyperparameters for the IF-Font Phase-2 model.
 
-    Defaults match the paper's training-config block (note "訓練配置"):
-      * 10 decoder blocks
-      * 8 attention heads
-      * d_model = 384
-      * batch_size = 128 (set in train YAML, not here)
-
-    For the CPU smoke test we override these via a tiny config.
+    Defaults match official `train.yaml` + `base.yaml`:
+      * 10 decoder blocks, 8 heads, d_model 384
+      * **1 self-attn + 1 cross-attn per block** (NOT 2+1)
+      * dropout 0.1, no Linear bias
+      * IDS max_len 35, vocab built from BabelStone + ids_iffont (radical)
+      * n_refs train=4 / val=3 (official train.yaml:40 has `num_refs: 3`,
+        then `+1` is added in `datasets_h5.py:185` to make it even)
+      * image_size 128, in_channels 3 (RGB)
+      * AR block_size = n_tokens + ids_max_len - 1 = 256 + 35 - 1 = 290
     """
 
     image_size: int = 128
-    in_channels: int = 1
+    in_channels: int = 3
     vq: VQTokenizerConfig = field(default_factory=VQTokenizerConfig)
 
-    # IDS encoder (small Transformer encoder over the IDS token sequence)
-    ids_vocab_size: int = 1024  # filled after IDSTokenizer.fit_from_charset
-    ids_max_len: int = 32
-    ids_encoder_layers: int = 2
-    ids_encoder_heads: int = 4
-    ids_encoder_dim: int = 384
+    # IDS encoder (now: just two embedding tables, no Transformer encoder).
+    ids_vocab_size: int = 1024
+    ids_max_len: int = 35
 
     # AR Transformer decoder
     d_model: int = 384
     n_heads: int = 8
     n_blocks: int = 10
-    n_self_attn_per_block: int = 2
-    """Paper §"訓練配置": '2 self-attention + 1 cross-attention per block'."""
     ffn_mult: int = 4
-    dropout: float = 0.0
+    dropout: float = 0.1
+    bias: bool = False
 
     # Reference handling
-    n_refs: int = 1
-    """Number of reference glyphs concatenated into the cross-attention context."""
+    n_refs: int = 3
 
-    # Tied to VQ tokenizer
     @property
     def n_target_tokens(self) -> int:
         return self.vq.n_tokens
@@ -353,275 +397,479 @@ class IFFontConfig:
     def target_vocab_size(self) -> int:
         return self.vq.codebook_size
 
+    @property
+    def ar_block_size(self) -> int:
+        """Block size for nanoGPT-style prefix AR. 256 + 35 - 1 = 290."""
+        return self.n_target_tokens + self.ids_max_len - 1
 
-class _MultiHeadAttention(nn.Module):
-    """Standard multi-head attention with optional causal mask.
 
-    Supports both self-attention (k=v=x) and cross-attention (separate kv).
+# ======================================================================
+# Attention building blocks (per-head QK-LN, causal/cross variants)
+# ======================================================================
+
+
+class _CausalSelfAttention(nn.Module):
+    """nanoGPT-style causal self-attn with QK-LayerNorm.
+
+    Official `nanogpt.CausalSelfAttention`:
+      * fused QKV projection
+      * per-head LN on Q and K
+      * Flash SDPA (PyTorch ≥ 2.0)
     """
 
-    def __init__(self, d_model: int, n_heads: int, *, dropout: float = 0.0) -> None:
+    def __init__(self, cfg: IFFontConfig) -> None:
         super().__init__()
-        assert d_model % n_heads == 0
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.head_dim = d_model // n_heads
-        self.q_proj = nn.Linear(d_model, d_model)
-        self.k_proj = nn.Linear(d_model, d_model)
-        self.v_proj = nn.Linear(d_model, d_model)
-        self.out_proj = nn.Linear(d_model, d_model)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(
-        self,
-        q_in: torch.Tensor,
-        k_in: torch.Tensor,
-        v_in: torch.Tensor,
-        *,
-        attn_mask: torch.Tensor | None = None,
-        key_padding_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        b, lq, _ = q_in.shape
-        lk = k_in.shape[1]
-        q = self.q_proj(q_in).view(b, lq, self.n_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(k_in).view(b, lk, self.n_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(v_in).view(b, lk, self.n_heads, self.head_dim).transpose(1, 2)
-        scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
-        if attn_mask is not None:
-            # attn_mask: [Lq, Lk] bool — True = MASK OUT (i.e., disallow).
-            scores = scores.masked_fill(attn_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
-        if key_padding_mask is not None:
-            # key_padding_mask: [B, Lk] bool — True = real token. Invert.
-            mask = ~key_padding_mask.bool()  # [B, Lk] True = MASK OUT
-            # Guard against all-True rows (every key masked) which would
-            # softmax to NaN. This happens e.g. when classifier-free guidance
-            # zeroes the entire IDS mask: the self-attn in the IDS encoder
-            # has no real keys for the dropped row. We unmask position 0 on
-            # such rows so softmax stays finite; the corresponding row's
-            # output is effectively zeroed at the consumer (decoder
-            # cross-attn sees only the ref tokens).
-            all_masked = mask.all(dim=1, keepdim=True)
-            if all_masked.any():
-                mask = mask.clone()
-                mask[:, 0:1] = mask[:, 0:1] & ~all_masked
-            scores = scores.masked_fill(mask.unsqueeze(1).unsqueeze(2), float("-inf"))
-        attn = torch.softmax(scores, dim=-1)
-        attn = self.dropout(attn)
-        out = torch.matmul(attn, v).transpose(1, 2).contiguous().view(b, lq, self.d_model)
-        return self.out_proj(out)
-
-
-class _FFN(nn.Module):
-    def __init__(self, d_model: int, mult: int, dropout: float) -> None:
-        super().__init__()
-        self.body = nn.Sequential(
-            nn.Linear(d_model, d_model * mult),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_model * mult, d_model),
-            nn.Dropout(dropout),
-        )
+        assert cfg.d_model % cfg.n_heads == 0
+        self.n_head = cfg.n_heads
+        self.n_embd = cfg.d_model
+        self.head_dim = cfg.d_model // cfg.n_heads
+        self.c_attn = nn.Linear(cfg.d_model, 3 * cfg.d_model, bias=cfg.bias)
+        self.c_proj = nn.Linear(cfg.d_model, cfg.d_model, bias=cfg.bias)
+        self.resid_dropout = nn.Dropout(cfg.dropout)
+        self.ln_q = nn.LayerNorm(self.head_dim)
+        self.ln_k = nn.LayerNorm(self.head_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.body(x)
+        b, t, c = x.shape
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        k = k.view(b, t, self.n_head, self.head_dim).transpose(1, 2)
+        q = q.view(b, t, self.n_head, self.head_dim).transpose(1, 2)
+        v = v.view(b, t, self.n_head, self.head_dim).transpose(1, 2)
+        q, k = self.ln_q(q), self.ln_k(k)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        y = y.transpose(1, 2).contiguous().view(b, t, c)
+        return self.resid_dropout(self.c_proj(y))
+
+
+class _CrossAttention(nn.Module):
+    """Cross-attention with separate Q-from-x and KV-from-style projections.
+
+    Official `nanogpt.CrossAttention`. Per-head QK-LN. No causal mask.
+    """
+
+    def __init__(self, cfg: IFFontConfig) -> None:
+        super().__init__()
+        assert cfg.d_model % cfg.n_heads == 0
+        self.n_head = cfg.n_heads
+        self.n_embd = cfg.d_model
+        self.head_dim = cfg.d_model // cfg.n_heads
+        self.c_attn = nn.Linear(cfg.d_model, cfg.d_model, bias=cfg.bias)
+        self.s_attn = nn.Linear(cfg.d_model, 2 * cfg.d_model, bias=cfg.bias)
+        self.c_proj = nn.Linear(cfg.d_model, cfg.d_model, bias=cfg.bias)
+        self.resid_dropout = nn.Dropout(cfg.dropout)
+        self.ln_q = nn.LayerNorm(self.head_dim)
+        self.ln_k = nn.LayerNorm(self.head_dim)
+
+    def forward(self, x: torch.Tensor, style: torch.Tensor) -> torch.Tensor:
+        b, tx, c = x.shape
+        ts = style.shape[1]
+        q = self.c_attn(x)
+        k, v = self.s_attn(style).chunk(2, dim=-1)
+        q = q.view(b, tx, self.n_head, self.head_dim).transpose(1, 2)
+        k = k.view(b, ts, self.n_head, self.head_dim).transpose(1, 2)
+        v = v.view(b, ts, self.n_head, self.head_dim).transpose(1, 2)
+        q, k = self.ln_q(q), self.ln_k(k)
+        y = F.scaled_dot_product_attention(q, k, v)
+        y = y.transpose(1, 2).contiguous().view(b, tx, c)
+        return self.resid_dropout(self.c_proj(y))
+
+
+class _MLP(nn.Module):
+    """Standard transformer FFN (4x), GELU, with dropout."""
+
+    def __init__(self, cfg: IFFontConfig) -> None:
+        super().__init__()
+        self.c_fc = nn.Linear(cfg.d_model, cfg.ffn_mult * cfg.d_model, bias=cfg.bias)
+        self.gelu = nn.GELU()
+        self.c_proj = nn.Linear(cfg.ffn_mult * cfg.d_model, cfg.d_model, bias=cfg.bias)
+        self.dropout = nn.Dropout(cfg.dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.dropout(self.c_proj(self.gelu(self.c_fc(x))))
 
 
 class _DecoderBlock(nn.Module):
-    """One block: N self-attn (causal) + 1 cross-attn (context) + FFN.
+    """**1 self-attn + 1 cross-attn + 1 FFN per block** (official Block2).
 
-    Paper config: 2 self-attn + 1 cross-attn per block. The repeated self-attn
-    gives the decoder extra capacity to model long-range AR dependencies
-    before mixing the conditioning context.
+    Pre-LN. The previous Phase-1 design used 2 self-attn — that was
+    paper-note-wrong (see github_diff.md A1).
     """
 
     def __init__(self, cfg: IFFontConfig) -> None:
         super().__init__()
-        self.n_self = cfg.n_self_attn_per_block
-        self.self_norms = nn.ModuleList(
-            [nn.LayerNorm(cfg.d_model) for _ in range(self.n_self)]
-        )
-        self.self_attns = nn.ModuleList(
-            [
-                _MultiHeadAttention(cfg.d_model, cfg.n_heads, dropout=cfg.dropout)
-                for _ in range(self.n_self)
-            ]
-        )
-        self.cross_norm_q = nn.LayerNorm(cfg.d_model)
-        self.cross_norm_kv = nn.LayerNorm(cfg.d_model)
-        self.cross_attn = _MultiHeadAttention(cfg.d_model, cfg.n_heads, dropout=cfg.dropout)
-        self.ffn_norm = nn.LayerNorm(cfg.d_model)
-        self.ffn = _FFN(cfg.d_model, cfg.ffn_mult, cfg.dropout)
+        self.ln_1 = nn.LayerNorm(cfg.d_model)
+        self.attn = _CausalSelfAttention(cfg)
+        self.ln_3 = nn.LayerNorm(cfg.d_model)
+        self.attn_cross = _CrossAttention(cfg)
+        self.ln_2 = nn.LayerNorm(cfg.d_model)
+        self.mlp = _MLP(cfg)
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        context: torch.Tensor,
-        *,
-        causal_mask: torch.Tensor,
-        context_pad_mask: torch.Tensor | None,
-    ) -> torch.Tensor:
-        # 2× self-attention with residual + LN-pre.
-        for norm, attn in zip(self.self_norms, self.self_attns, strict=True):
-            h = norm(x)
-            x = x + attn(h, h, h, attn_mask=causal_mask)
-        # 1× cross-attention
-        q = self.cross_norm_q(x)
-        kv = self.cross_norm_kv(context)
-        x = x + self.cross_attn(q, kv, kv, key_padding_mask=context_pad_mask)
-        # FFN
-        x = x + self.ffn(self.ffn_norm(x))
+    def forward(self, x: torch.Tensor, style: torch.Tensor) -> torch.Tensor:
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.attn_cross(self.ln_3(x), style)
+        x = x + self.mlp(self.ln_2(x))
         return x
 
 
-def _causal_mask(seq_len: int, *, device: torch.device) -> torch.Tensor:
-    """Upper-triangular bool mask: True at positions to MASK (j > i)."""
-    return torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=1)
+# ======================================================================
+# IDS encoder — bare embedding tables (no Transformer encoder)
+# ======================================================================
 
 
-class _LearnedPositionalEmbedding(nn.Module):
-    def __init__(self, max_len: int, d_model: int) -> None:
-        super().__init__()
-        self.embed = nn.Embedding(max_len, d_model)
-        self.max_len = max_len
+class IDSEmbedding(nn.Module):
+    """Two `nn.Embedding` tables over the IDS vocabulary.
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        b, seq_len, _ = x.shape
-        if seq_len > self.max_len:
-            raise ValueError(
-                f"sequence longer than max_len {self.max_len}: got {seq_len}"
-            )
-        pos = torch.arange(seq_len, device=x.device)
-        return x + self.embed(pos).unsqueeze(0).expand(b, -1, -1)
+    `embedding` feeds the AR decoder as a prefix (prepended to target VQ
+    embeddings).
+    `embedding2` feeds the 3SA cross-attention inside the StyleEncoder.
 
-
-class IDSTextEncoder(nn.Module):
-    """Small Transformer encoder over IDS tokens.
-
-    Paper says "IDS → text encoder"; depth/width are not specified, so this is
-    a deliberately small Transformer encoder (paper-vague → see blind_impl.md).
-    The output is fed (concatenated with reference VQ tokens) to the decoder
-    cross-attention as the conditioning context.
+    This is the exact design of official `encoder.IDSEncoder` once the
+    commented-out Transformer encoder lines are taken at face value.
     """
 
-    def __init__(self, cfg: IFFontConfig) -> None:
+    def __init__(self, vocab_size: int, n_embd: int) -> None:
         super().__init__()
-        self.embed = nn.Embedding(cfg.ids_vocab_size, cfg.ids_encoder_dim)
-        self.pos = _LearnedPositionalEmbedding(cfg.ids_max_len, cfg.ids_encoder_dim)
-        self.layers = nn.ModuleList()
-        for _ in range(cfg.ids_encoder_layers):
-            self.layers.append(
-                nn.ModuleDict(
-                    {
-                        "norm1": nn.LayerNorm(cfg.ids_encoder_dim),
-                        "self_attn": _MultiHeadAttention(
-                            cfg.ids_encoder_dim, cfg.ids_encoder_heads, dropout=cfg.dropout
-                        ),
-                        "norm2": nn.LayerNorm(cfg.ids_encoder_dim),
-                        "ffn": _FFN(cfg.ids_encoder_dim, cfg.ffn_mult, cfg.dropout),
-                    }
-                )
-            )
-        # Project to decoder's d_model if widths differ.
-        self.out_proj = (
-            nn.Identity()
-            if cfg.ids_encoder_dim == cfg.d_model
-            else nn.Linear(cfg.ids_encoder_dim, cfg.d_model)
+        self.vocab_size = vocab_size
+        self.n_embd = n_embd
+        self.embedding = nn.Embedding(vocab_size, n_embd)
+        self.embedding2 = nn.Embedding(vocab_size, n_embd)
+
+    def forward(self, ids_token_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """ids_token_ids: [B, L] long → (embed [B, L, n_embd], embed2 [B, L, n_embd])."""
+        return self.embedding(ids_token_ids), self.embedding2(ids_token_ids)
+
+
+# ======================================================================
+# StyleEncoder + 3SA + MoCo wrapper
+# ======================================================================
+
+
+class _ConvBlock(nn.Module):
+    """Small pre-activation conv block; instance-norm; reflect-pad.
+
+    Approximates the official `modules.blocks.ConvBlock` used inside
+    `QuantExtEncoder._init_enc` (`encoder.py:513-525`).
+    """
+
+    def __init__(self, c_in: int, c_out: int, *, dropout: float = 0.0) -> None:
+        super().__init__()
+        self.norm = nn.InstanceNorm2d(c_in, affine=False)
+        self.act = nn.ReLU()
+        self.pad = nn.ReflectionPad2d(1)
+        self.conv = nn.Conv2d(c_in, c_out, 3)
+        self.dropout = nn.Dropout2d(dropout) if dropout > 0 else nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.act(self.norm(x))
+        x = self.dropout(x)
+        return self.conv(self.pad(x))
+
+
+class _ResBlock(nn.Module):
+    def __init__(self, c_in: int, c_out: int, *, dropout: float = 0.0) -> None:
+        super().__init__()
+        self.conv1 = _ConvBlock(c_in, c_out, dropout=dropout)
+        self.conv2 = _ConvBlock(c_out, c_out, dropout=dropout)
+        self.skip = nn.Conv2d(c_in, c_out, 1) if c_in != c_out else nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv2(self.conv1(x)) + self.skip(x)
+
+
+class StyleEncoder(nn.Module):
+    """Per-ref CNN stem + coverage-weighted global pool + 3SA cross-attn.
+
+    Inputs (official `StyleEncoder.forward`):
+      * indices: [B, N, n_tokens] long — VQ indices for N refs.
+      * ids:     [B, L, c_out]    — IDS embedding (ids_embed2).
+      * sim:     [B, N]           — coverage similarity per (target, ref).
+
+    Outputs:
+      * x_sss: [B, L + n_tokens, c_out] — concat([x_l, x_g]).
+      * cl:    [B, c_out] — contrastive head feature (training-only).
+    """
+
+    def __init__(
+        self,
+        adapter: VQTokenizerAdapter,
+        c_out: int,
+        l_ids: int,
+        *,
+        n_head: int = 8,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.adapter = adapter
+        self.c_out = c_out
+        self.n_head = n_head
+        c_in = adapter.embedding_dim  # 4
+
+        C = 32
+        self.stem = nn.Sequential(
+            _ConvBlock(c_in, C, dropout=dropout),
+            _ConvBlock(C * 1, C * 2, dropout=dropout),
+            _ConvBlock(C * 2, C * 4, dropout=dropout),
+            _ResBlock(C * 4, C * 4, dropout=dropout),
+            _ResBlock(C * 4, C * 4, dropout=dropout),
+            _ResBlock(C * 4, C * 8, dropout=dropout),
+            _ResBlock(C * 8, c_out, dropout=dropout),
         )
 
-    def forward(
-        self, ids_token_ids: torch.Tensor, attention_mask: torch.Tensor
-    ) -> torch.Tensor:
-        """ids_token_ids: [B, L]. mask: [B, L] bool (True = real token).
+        # 3SA cross-attn: IDS queries → ref-feature K/V.
+        self.q_linear = nn.Linear(c_out, c_out, bias=False)
+        self.kv_linear = nn.Linear(c_out, 2 * c_out, bias=False)
+        self.c_proj = nn.Linear(c_out, c_out, bias=False)
+        self.layer_norm = nn.LayerNorm(c_out, eps=1e-6)
+        self.wpe = nn.Embedding(l_ids, c_out)
+        self.ln_q = nn.LayerNorm(c_out // n_head)
+        self.ln_k = nn.LayerNorm(c_out // n_head)
 
-        Returns context tokens [B, L, d_model].
+        # Contrastive head (replaced by MoCoWrapper for real training).
+        n_tokens = adapter.n_tokens
+        self.cl_head = nn.Sequential(
+            nn.Linear(c_out, 1),
+            nn.Flatten(-2, -1),
+            nn.LayerNorm(n_tokens),
+            nn.SiLU(True),
+            nn.Dropout(dropout),
+        )
+        self.cl_fc = nn.Linear(n_tokens, c_out)
+
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, mean=0.0, std=0.02)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Embedding):
+                nn.init.normal_(m.weight, mean=0.0, std=0.02)
+
+    def _structure_style_aggregation(
+        self, ids: torch.Tensor, feat: torch.Tensor
+    ) -> torch.Tensor:
+        """ids: [B, L, c]; feat: [B, N*n_tokens, c] → [B, L, c]."""
+        seq_len = ids.shape[1]
+        pos = self.wpe(torch.arange(seq_len, device=ids.device))  # [L, c]
+        ids = ids + pos.unsqueeze(0)
+        b = ids.shape[0]
+        head_dim = self.c_out // self.n_head
+
+        q = self.q_linear(ids).view(b, seq_len, self.n_head, head_dim).transpose(1, 2)
+        kv = self.kv_linear(feat)
+        k, v = kv.chunk(2, dim=-1)
+        k = k.view(b, -1, self.n_head, head_dim).transpose(1, 2)
+        v = v.view(b, -1, self.n_head, head_dim).transpose(1, 2)
+        q, k = self.ln_q(q), self.ln_k(k)
+        y = F.scaled_dot_product_attention(q, k, v)
+        return y.transpose(1, 2).contiguous().view(b, seq_len, self.c_out)
+
+    def forward(
+        self, indices: torch.Tensor, ids: torch.Tensor, sim: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
-        x = self.embed(ids_token_ids)
-        x = self.pos(x)
-        for layer in self.layers:
-            h = layer["norm1"](x)
-            x = x + layer["self_attn"](h, h, h, key_padding_mask=attention_mask)
-            x = x + layer["ffn"](layer["norm2"](x))
-        return self.out_proj(x)
+        indices: [B, N, n_tokens] long.
+        ids:     [B, L, c_out].
+        sim:     [B, N] — coverage similarity.
+        """
+        b, n_ref, n_tokens = indices.shape
+
+        # Look up codebook quant per ref → [B*N, embed_dim, h, w].
+        flat_idx = indices.view(-1, n_tokens)
+        x = self.adapter.lookup_quant(flat_idx)  # [B*N, embed_dim, h, w]
+        x = self.stem(x)  # [B*N, c_out, h, w]
+        h_w = x.shape[-1]
+        x = x.view(b, n_ref, self.c_out, h_w * h_w).permute(0, 1, 3, 2)
+        # x: [B, N, n_tokens, c_out]
+
+        # Coverage-weighted global pool.
+        sim = sim * 3
+        weights = sim.softmax(dim=1)  # [B, N]
+        x_g = torch.einsum("bnfc,bn->bfc", x, weights)  # [B, n_tokens, c_out]
+
+        # 3SA cross-attention.
+        x_flat = x.reshape(b, n_ref * n_tokens, self.c_out)
+        x_l = self._structure_style_aggregation(ids, x_flat)  # [B, L, c_out]
+        x_l = self.c_proj(x_l)
+
+        x_sss = self.layer_norm(torch.cat([x_l, x_g], dim=1))  # [B, L+n_tokens, c_out]
+
+        if not self.training:
+            return x_sss, None
+        cl = self.cl_fc(self.cl_head(x_g))  # [B, c_out]
+        return x_sss, cl
+
+
+class MoCoWrapper(nn.Module):
+    """Two StyleEncoders + momentum update + projector/predictor MLPs.
+
+    Returns (x_sss, cl) where cl is `[B, 2, dim]` stacking (predicted query,
+    momentum key) — fed into `losses.sup_cl`.
+    """
+
+    def __init__(
+        self,
+        adapter: VQTokenizerAdapter,
+        c_out: int,
+        l_ids: int,
+        *,
+        momentum: float = 0.995,
+        mlp_dim: int = 1024,
+        cl_dim: int = 256,
+    ) -> None:
+        super().__init__()
+        self.adapter = adapter
+        self.momentum = momentum
+        self.enc = StyleEncoder(adapter, c_out, l_ids, dropout=0.1)
+        self.enc_m = StyleEncoder(adapter, c_out, l_ids, dropout=0.1)
+        self._build_projector_and_predictor(c_out, mlp_dim, cl_dim)
+        self._enc_sync()
+        for p in self.enc_m.parameters():
+            p.requires_grad = False
+
+    def _build_mlp(
+        self, num_layers: int, input_dim: int, mlp_dim: int, output_dim: int, *, last_bn: bool = True
+    ) -> nn.Sequential:
+        layers: list[nn.Module] = []
+        for i in range(num_layers):
+            d1 = input_dim if i == 0 else mlp_dim
+            d2 = output_dim if i == num_layers - 1 else mlp_dim
+            layers.append(nn.Linear(d1, d2, bias=False))
+            if i < num_layers - 1:
+                layers.append(nn.BatchNorm1d(d2))
+                layers.append(nn.ReLU(inplace=True))
+            elif last_bn:
+                layers.append(nn.BatchNorm1d(d2, affine=False))
+        return nn.Sequential(*layers)
+
+    def _build_projector_and_predictor(self, c_out: int, mlp_dim: int, dim: int) -> None:
+        hidden_dim = self.enc.cl_fc.weight.shape[1]
+        del self.enc.cl_fc, self.enc_m.cl_fc
+        self.enc.cl_fc = self._build_mlp(2, hidden_dim, mlp_dim, dim)
+        self.enc_m.cl_fc = self._build_mlp(2, hidden_dim, mlp_dim, dim)
+        self.predictor = self._build_mlp(2, dim, mlp_dim, dim, last_bn=False)
+
+    @torch.no_grad()
+    def _enc_sync(self) -> None:
+        for pq, pk in zip(self.enc.parameters(), self.enc_m.parameters(), strict=False):
+            pk.data.copy_(pq.data)
+
+    @torch.no_grad()
+    def momentum_update(self, ratio: float) -> None:
+        """Cosine-scheduled momentum (matches official `MoCoWrapper.momentum_update`)."""
+        m = 1.0 - 0.5 * (1.0 + math.cos(math.pi * ratio)) * (1.0 - self.momentum)
+        for pq, pk in zip(self.enc.parameters(), self.enc_m.parameters(), strict=False):
+            pk.data.mul_(m).add_(pq.detach().data * (1.0 - m))
+
+    def forward(
+        self, indices: torch.Tensor, ids: torch.Tensor, sim: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        sss, cl = self.enc(indices, ids, sim)
+        if not self.training or cl is None:
+            return sss, None
+        cl_q = self.predictor(cl)
+        with torch.no_grad():
+            _, cl_m = self.enc_m(indices, ids, sim)
+        if cl_m is None:
+            cl_m = cl_q.detach()
+        cl_stack = torch.stack([cl_q, cl_m.detach()], dim=1)  # [B, 2, dim]
+        return sss, cl_stack
+
+
+# ======================================================================
+# AR Transformer decoder (nanoGPT with prefix-prepended IDS)
+# ======================================================================
 
 
 class TransformerARDecoder(nn.Module):
-    """10-block AR decoder over target VQ token sequence.
+    """10-block AR decoder over target VQ token sequence with prefix-prepended IDS.
 
-    Inputs at every training step:
-      * target_tokens: [B, n_tokens] long — codebook indices to predict.
-        We shift right by 1 and prepend a BOS-token row of all-zero index.
-      * context: [B, Lc, d_model] — encoder side (IDS + ref tokens).
-      * context_pad_mask: [B, Lc] bool — True = real context token.
-    Output: logits [B, n_tokens, codebook_size].
+    forward(idx, style, ids_embed):
+      * idx:      [B, T]    target VQ indices (training: shifted target, but
+                            the shift happens in `IFFont.forward`).
+      * style:    [B, Ls, d_model] (cross-attn K/V; from StyleEncoder/MoCo).
+      * ids_embed:[B, Li, d_model] (prefix; from IDSEmbedding.embedding).
+    Returns: logits [B, Li + T, target_vocab_size].
     """
 
     def __init__(self, cfg: IFFontConfig) -> None:
         super().__init__()
         self.cfg = cfg
-        self.token_embed = nn.Embedding(cfg.target_vocab_size + 1, cfg.d_model)
-        """+1 entry: index ``codebook_size`` is the BOS/start token."""
-        self.bos_index = cfg.target_vocab_size
-        self.pos = _LearnedPositionalEmbedding(cfg.n_target_tokens, cfg.d_model)
-        self.blocks = nn.ModuleList([_DecoderBlock(cfg) for _ in range(cfg.n_blocks)])
-        self.norm = nn.LayerNorm(cfg.d_model)
-        self.head = nn.Linear(cfg.d_model, cfg.target_vocab_size, bias=False)
+        self.wte = nn.Embedding(cfg.target_vocab_size, cfg.d_model)
+        self.wpe = nn.Embedding(cfg.ar_block_size, cfg.d_model)
+        self.drop = nn.Dropout(cfg.dropout)
+        self.h = nn.ModuleList([_DecoderBlock(cfg) for _ in range(cfg.n_blocks)])
+        self.ln_f = nn.LayerNorm(cfg.d_model)
+        self.lm_head = nn.Linear(cfg.d_model, cfg.target_vocab_size, bias=False)
+        # Weight tying (official `nanogpt.py:197`).
+        self.wte.weight = self.lm_head.weight
 
-    def _shifted_input(self, target_tokens: torch.Tensor) -> torch.Tensor:
-        b, n = target_tokens.shape
-        bos = torch.full((b, 1), self.bos_index, dtype=torch.long, device=target_tokens.device)
-        return torch.cat([bos, target_tokens[:, :-1]], dim=1)
+        self.apply(self._init_weights)
+        # scaled init on residual c_proj weights, per nanoGPT.
+        for pn, p in self.named_parameters():
+            if pn.endswith("c_proj.weight"):
+                nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * cfg.n_blocks))
+
+    @staticmethod
+    def _init_weights(module: nn.Module) -> None:
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(
-        self,
-        target_tokens: torch.Tensor,
-        context: torch.Tensor,
-        *,
-        context_pad_mask: torch.Tensor | None = None,
+        self, idx: torch.Tensor, style: torch.Tensor, ids_embed: torch.Tensor
     ) -> torch.Tensor:
-        x = self.token_embed(self._shifted_input(target_tokens))
-        x = self.pos(x)
-        n = x.shape[1]
-        mask = _causal_mask(n, device=x.device)
-        for block in self.blocks:
-            x = block(x, context, causal_mask=mask, context_pad_mask=context_pad_mask)
-        x = self.norm(x)
-        return self.head(x)  # [B, N, codebook_size]
+        b, t = idx.shape
+        li = ids_embed.shape[1]
+        total = t + li
+        assert total <= self.cfg.ar_block_size, (
+            f"sequence ({total}) longer than ar_block_size ({self.cfg.ar_block_size})"
+        )
+        pos = torch.arange(total, dtype=torch.long, device=idx.device)
+        tok = self.wte(idx)
+        tok = torch.cat([ids_embed, tok], dim=1)
+        pos_e = self.wpe(pos).unsqueeze(0)
+        x = tok + pos_e
+        # Apply dropout only to the target-token positions, not the IDS prefix
+        # (official `nanogpt.GPT.forward`: drops `x[:, t:, :]` where `t` is
+        # ids_embed length — note name collision with our `t`; same idea).
+        x[:, li:, :] = self.drop(x[:, li:, :])
+        for block in self.h:
+            x = block(x, style)
+        x = self.ln_f(x)
+        return self.lm_head(x)
 
     @torch.no_grad()
-    def sample(
+    def generate(
         self,
-        context: torch.Tensor,
+        idx: torch.Tensor,
+        style: torch.Tensor,
+        ids_embed: torch.Tensor,
         *,
-        context_pad_mask: torch.Tensor | None,
-        n_tokens: int,
+        max_new_tokens: int,
         temperature: float = 1.0,
+        top_k: int | None = None,
+        sample: bool = True,
     ) -> torch.Tensor:
-        """Greedy / temperature autoregressive sampling.
-
-        Returns [B, n_tokens] long.
-        """
-        b = context.shape[0]
-        device = context.device
-        out = torch.full((b, n_tokens), 0, dtype=torch.long, device=device)
-        # First "previous token" is the BOS index.
-        prev = torch.full((b, 1), self.bos_index, dtype=torch.long, device=device)
-        # We always recompute the prefix; for a smoke test this is fine.
-        for step in range(n_tokens):
-            x = self.token_embed(prev)
-            x = self.pos(x)
-            cur_len = x.shape[1]
-            mask = _causal_mask(cur_len, device=device)
-            for block in self.blocks:
-                x = block(x, context, causal_mask=mask, context_pad_mask=context_pad_mask)
-            logits = self.head(self.norm(x[:, -1:, :]))  # [B, 1, K]
-            if temperature > 0:
-                probs = torch.softmax(logits.squeeze(1) / max(temperature, 1e-6), dim=-1)
-                token = torch.multinomial(probs, num_samples=1)  # [B, 1]
+        """Autoregressive sampling (matches `GPT.generate`)."""
+        for _ in range(max_new_tokens):
+            block_size = self.cfg.ar_block_size
+            idx_cond = idx if idx.size(1) <= block_size else idx[:, -block_size:]
+            logits = self(idx_cond, style, ids_embed)
+            logits = logits[:, -1, :] / max(temperature, 1e-6)
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits = torch.where(
+                    logits < v[:, [-1]], torch.full_like(logits, -float("inf")), logits
+                )
+            probs = F.softmax(logits, dim=-1)
+            if sample:
+                idx_next = torch.multinomial(probs, num_samples=1)
             else:
-                token = logits.squeeze(1).argmax(dim=-1, keepdim=True)
-            out[:, step : step + 1] = token
-            prev = torch.cat([prev, token], dim=1)
-        return out
+                idx_next = probs.argmax(dim=-1, keepdim=True)
+            idx = torch.cat([idx, idx_next], dim=1)
+        return idx
 
 
 # ======================================================================
@@ -630,174 +878,224 @@ class TransformerARDecoder(nn.Module):
 
 
 class IFFont(nn.Module):
-    """End-to-end IF-Font module: VQ tokenizer + IDS encoder + AR decoder.
-
-    Stage A (per CLAUDE.md three-stage plan): only the VQ tokenizer is
-    trained on TTF renders. The AR decoder pathway is dormant (its loss
-    weight is 0 in the Stage A YAML).
-    Stage B/C: VQ is frozen (or fine-tuned) and the AR decoder is trained
-    with cross-entropy on target tokens.
+    """End-to-end IF-Font module (Phase 2): frozen VQGAN + IDS embeddings +
+    StyleEncoder/MoCo + AR decoder.
     """
 
-    def __init__(self, cfg: IFFontConfig) -> None:
+    def __init__(
+        self,
+        cfg: IFFontConfig,
+        *,
+        vq_adapter: VQTokenizerAdapter | None = None,
+    ) -> None:
         super().__init__()
         self.cfg = cfg
-        self.vq = VQTokenizer(cfg.vq)
-        self.ids_encoder = IDSTextEncoder(cfg)
-        self.decoder = TransformerARDecoder(cfg)
-        # Learned "null" IDS context, used when no ids tensor is provided.
-        self.ids_null_token = nn.Parameter(torch.zeros(1, 1, cfg.d_model))
-        # Reference-token projection from VQ embedding_dim -> decoder d_model.
-        # Built eagerly here so the module always lives in ``state_dict()``,
-        # even if ``encode_refs_to_tokens`` is never called during training
-        # (e.g. Stage A, where refs are not used). Otherwise Stage B reload
-        # would fail with a missing-key error.
-        self._ref_proj: nn.Module = (
-            nn.Identity()
-            if cfg.vq.embedding_dim == cfg.d_model
-            else nn.Linear(cfg.vq.embedding_dim, cfg.d_model)
+        self.vq = vq_adapter if vq_adapter is not None else VQTokenizerAdapter(cfg.vq)
+        # Re-pin our config's vq to whatever the adapter actually carries.
+        cfg.vq = self.vq.cfg
+        self.ids_encoder = IDSEmbedding(cfg.ids_vocab_size, cfg.d_model)
+        self.moco_wrapper = MoCoWrapper(
+            self.vq,
+            c_out=cfg.d_model,
+            l_ids=cfg.ids_max_len,
         )
+        self.decoder = TransformerARDecoder(cfg)
 
     # ------------------------------------------------------------------
-    # Context building
+    # Coverage similarity (target-vs-ref structural overlap)
     # ------------------------------------------------------------------
 
-    def encode_refs_to_tokens(self, ref_images: torch.Tensor) -> torch.Tensor:
-        """ref_images: [B, N, C, H, W] → embeds [B, N*n_tokens, D].
+    @staticmethod
+    def _coverage_one(target: tuple[str, ...], source: tuple[str, ...], IDC: set[str]) -> float:
+        """Longest IDC-anchored common run length normalised by target len.
 
-        Reuses the VQ encoder + codebook to convert each reference to a
-        sequence of d_model-wide embedding vectors. We then linearly project
-        from embedding_dim to d_model.
-
-        Note: ref tokenization is gradient-disconnected by design. ``vq.encode``
-        returns long indices (no grad), and ``quantizer.lookup`` is
-        ``F.embedding`` over the codebook **buffer** (not a Parameter). VQ is
-        treated as a frozen tokenizer in Stage B/C — refs do not move the
-        codebook nor the VQ encoder via this path. The previous comment
-        claiming a straight-through estimator was incorrect.
+        Mirrors official `IDSEncoder.coverage` (`encoder.py:307-357`).
         """
+        ti_max = len(target)
+        if ti_max == 0:
+            return 0.0
+        match_cnt = 0
+        ti = 0
+        while ti < ti_max:
+            tc = target[ti]
+            if tc not in IDC:
+                ti += 1
+                continue
+            si, si_max = 0, len(source)
+            advanced = False
+            while si < si_max:
+                if source[si] != tc:
+                    si += 1
+                    continue
+                ti2, si2 = ti, si
+                while ti2 < ti_max and si2 < si_max and target[ti2] == source[si2]:
+                    ti2 += 1
+                    si2 += 1
+                if ti2 == ti_max or target[ti2] in IDC:
+                    match_cnt += ti2 - ti
+                    ti = ti2
+                    advanced = True
+                    break
+                si += 1
+            if not advanced:
+                ti += 1
+        return match_cnt / ti_max
+
+    @classmethod
+    def compute_coverage(
+        cls,
+        target_ids: list[tuple[str, ...]],
+        source_ids: list[list[tuple[str, ...]]],
+        idc_chars: tuple[str, ...],
+    ) -> torch.Tensor:
+        """Compute coverage similarity for a batch.
+
+        target_ids: list of length B, each a tuple of IDS tokens for the target.
+        source_ids: list of length B, each a list of N tuples (ref IDS).
+        idc_chars: the 12 IDC symbols.
+        """
+        idc_set = set(idc_chars)
+        out = []
+        for t, refs in zip(target_ids, source_ids, strict=False):
+            row = [cls._coverage_one(t, s, idc_set) for s in refs]
+            out.append(row)
+        return torch.tensor(out, dtype=torch.float32)
+
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
+
+    def encode_target(self, image: torch.Tensor) -> torch.Tensor:
+        """image [B, C, H, W] → indices [B, n_tokens]."""
+        return self.vq.encode(image)
+
+    def encode_refs(self, ref_images: torch.Tensor) -> torch.Tensor:
+        """ref_images [B, N, C, H, W] → indices [B, N, n_tokens]."""
         b, n, c, h, w = ref_images.shape
-        flat = ref_images.reshape(b * n, c, h, w)
-        indices = self.vq.encode(flat)  # [B*N, n_tokens]
-        embeds = self.vq.quantizer.lookup(indices)  # [B*N, n_tokens, D_vq]
-        embeds = embeds.reshape(b, n * self.vq.n_tokens, self.cfg.vq.embedding_dim)
-        return self.ref_to_decoder_proj(embeds)
-
-    @property
-    def ref_to_decoder_proj(self) -> nn.Module:
-        """Reference-token projection, built eagerly in ``__init__``."""
-        return self._ref_proj
-
-    def build_context(
-        self,
-        ids_token_ids: torch.Tensor | None,
-        ids_attention_mask: torch.Tensor | None,
-        ref_images: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return (context [B, Lc, d_model], context_pad_mask [B, Lc] bool).
-
-        Empty-ref / empty-ids cases fall back to a learned null token so the
-        decoder always sees ≥1 context token.
-        """
-        # IDS branch
-        if ids_token_ids is not None and ids_token_ids.numel() > 0:
-            assert ids_attention_mask is not None
-            ids_ctx = self.ids_encoder(ids_token_ids, ids_attention_mask)
-            ids_mask = ids_attention_mask
-            b = ids_ctx.shape[0]
-            device = ids_ctx.device
-        elif ref_images is not None and ref_images.numel() > 0:
-            b = ref_images.shape[0]
-            device = ref_images.device
-            ids_ctx = self.ids_null_token.expand(b, 1, -1).to(device)
-            ids_mask = torch.ones(b, 1, dtype=torch.bool, device=device)
-        else:
-            raise ValueError("Must provide at least one of (ids_token_ids, ref_images).")
-
-        # Ref branch
-        if ref_images is not None and ref_images.numel() > 0:
-            ref_ctx = self.encode_refs_to_tokens(ref_images)
-            ref_mask = torch.ones(
-                ref_ctx.shape[0], ref_ctx.shape[1], dtype=torch.bool, device=device
-            )
-            context = torch.cat([ids_ctx, ref_ctx], dim=1)
-            pad_mask = torch.cat([ids_mask, ref_mask], dim=1)
-        else:
-            context = ids_ctx
-            pad_mask = ids_mask
-        return context, pad_mask
-
-    # ------------------------------------------------------------------
-    # Forward / loss helpers
-    # ------------------------------------------------------------------
+        idx = self.vq.encode(ref_images.reshape(b * n, c, h, w))  # [B*N, n_tokens]
+        return idx.view(b, n, -1)
 
     def forward(
         self,
         target_image: torch.Tensor,
         *,
-        ids_token_ids: torch.Tensor | None = None,
-        ids_attention_mask: torch.Tensor | None = None,
-        ref_images: torch.Tensor | None = None,
-        return_recon: bool = False,
+        ids_token_ids: torch.Tensor,
+        ref_images: torch.Tensor,
+        coverage_sim: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        """Compute everything needed for the AR cross-entropy + VQ losses.
+        """Compute everything needed for sq (CE) + sup_cl losses.
 
-        Returns dict with keys:
-          logits      : [B, n_tokens, codebook_size] — AR head output.
-          target_ids  : [B, n_tokens] long — VQ indices the AR decoder predicts.
-          vq_loss     : scalar — commitment loss on the *target* glyph.
-          recon_loss  : scalar — MSE(target, VQ-recon(target)).
-          recon       : (optional) reconstructed image from VQ decoder.
+        Args:
+            target_image: [B, C, H, W] target glyph in [-1, 1].
+            ids_token_ids: [B, L] long — IDS tokens (PAD-right).
+            ref_images: [B, N, C, H, W] reference glyphs.
+            coverage_sim: [B, N] — IDS-coverage similarity score per ref.
+
+        Returns dict:
+          * logits: [B, n_tokens, target_vocab_size] — sliced to image-token
+            positions only (the official `net2net_model.py:99` slice).
+          * target_ids: [B, n_tokens] — VQ indices of the target glyph.
+          * cl: [B, 2, dim] or None — MoCo contrastive features (training-only).
         """
-        vq_out = self.vq(target_image)
-        target_ids = vq_out["indices"]  # [B, n_tokens]
-        context, pad_mask = self.build_context(ids_token_ids, ids_attention_mask, ref_images)
-        logits = self.decoder(target_ids, context, context_pad_mask=pad_mask)
-        out = {
-            "logits": logits,
+        target_ids = self.encode_target(target_image)  # [B, n_tokens]
+        ref_indices = self.encode_refs(ref_images)  # [B, N, n_tokens]
+
+        ids_embed, ids_embed2 = self.ids_encoder(ids_token_ids)  # both [B, L, d]
+        x_sss, cl = self.moco_wrapper(ref_indices, ids_embed2, coverage_sim)
+
+        # AR input is the target token sequence with prefix-prepended IDS;
+        # decoder forward then slices the IDS portion out of logits, leaving
+        # only image-token logits (official `net2net_model.py:98-99`):
+        #
+        #   logits = self.netTransformer(x[:, :-1], x_sss, embeddings=ids_embed)
+        #   logits = logits[:, ids_embed.shape[1] - 1:]
+        #
+        # The -1 indexing on x and the +-1 slice align positions: at training
+        # time we feed x[:-1] and the decoder predicts shifted-by-one tokens.
+        logits = self.decoder(target_ids[:, :-1], x_sss, ids_embed)  # [B, L+T-1, K]
+        ids_len = ids_embed.shape[1]
+        logits = logits[:, ids_len - 1:]  # [B, T, K]
+
+        return {
+            "logits": logits,  # [B, n_tokens, target_vocab_size]
             "target_ids": target_ids,
-            "vq_loss": vq_out["vq_loss"],
-            "recon_loss": vq_out["recon_loss"],
+            "cl": cl,
+            "x_sss": x_sss,
+            "ids_embed": ids_embed,
         }
-        if return_recon:
-            out["recon"] = vq_out["recon"]
-        return out
 
     @torch.no_grad()
     def sample(
         self,
         *,
-        ids_token_ids: torch.Tensor | None = None,
-        ids_attention_mask: torch.Tensor | None = None,
-        ref_images: torch.Tensor | None = None,
+        ids_token_ids: torch.Tensor,
+        ref_images: torch.Tensor,
+        coverage_sim: torch.Tensor,
         temperature: float = 1.0,
+        top_k: int | None = 100,
+        sample: bool = True,
     ) -> torch.Tensor:
         """Autoregressive sample → image [B, C, H, W]."""
-        context, pad_mask = self.build_context(ids_token_ids, ids_attention_mask, ref_images)
-        n_tokens = self.cfg.n_target_tokens
-        indices = self.decoder.sample(
-            context,
-            context_pad_mask=pad_mask,
-            n_tokens=n_tokens,
+        ref_indices = self.encode_refs(ref_images)
+        ids_embed, ids_embed2 = self.ids_encoder(ids_token_ids)
+        was_training = self.moco_wrapper.training
+        self.moco_wrapper.eval()
+        x_sss, _ = self.moco_wrapper(ref_indices, ids_embed2, coverage_sim)
+        if was_training:
+            self.moco_wrapper.train()
+
+        b = ids_token_ids.shape[0]
+        device = ids_token_ids.device
+        idx0 = torch.empty(b, 0, dtype=torch.long, device=device)
+        seq = self.decoder.generate(
+            idx0,
+            x_sss,
+            ids_embed,
+            max_new_tokens=self.cfg.n_target_tokens,
             temperature=temperature,
+            top_k=top_k,
+            sample=sample,
         )
-        # Clamp into valid codebook range (sample() shouldn't escape but be safe).
-        indices = indices.clamp(0, self.cfg.target_vocab_size - 1)
-        return self.vq.decode_indices(indices)
+        seq = seq.clamp(0, self.cfg.target_vocab_size - 1)
+        return self.vq.decode_indices(seq)
 
 
-def build_if_font(cfg: IFFontConfig) -> IFFont:
-    return IFFont(cfg)
+def build_if_font(cfg: IFFontConfig, *, vq_adapter: VQTokenizerAdapter | None = None) -> IFFont:
+    return IFFont(cfg, vq_adapter=vq_adapter)
+
+
+# Stable public re-exports (back-compat aliases for old VectorQuantizer etc.
+# are intentionally dropped; the previous in-training EMA codebook does not
+# exist any more).
+class VectorQuantizer(nn.Module):  # pragma: no cover — deprecated stub kept for import compat
+    """DEPRECATED. The Phase-2 IF-Font uses a frozen pretrained tokenizer;
+    in-training VQ updates no longer exist. This stub keeps old imports
+    from breaking but raises if anyone actually constructs it."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        raise RuntimeError(
+            "VectorQuantizer is deprecated in Phase 2 — IF-Font uses a frozen "
+            "pretrained CompVis vq-f8-n256 adapter (see VQTokenizerAdapter). "
+            "Update your code to load via `VQTokenizerAdapter.from_pretrained_compvis` "
+            "or accept the random-weight stub for tests."
+        )
+
+
+# Silence unused-import warnings for the deterministic-init helper.
+_ = random
 
 
 __all__ = [
+    "IDSEmbedding",
     "IFFont",
     "IFFontConfig",
-    "IDSTextEncoder",
+    "MoCoWrapper",
+    "StyleEncoder",
     "TransformerARDecoder",
     "VQDecoder",
     "VQEncoder",
     "VQTokenizer",
+    "VQTokenizerAdapter",
     "VQTokenizerConfig",
     "VectorQuantizer",
     "build_if_font",

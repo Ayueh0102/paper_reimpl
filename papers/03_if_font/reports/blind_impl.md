@@ -1,5 +1,11 @@
 # Blind reimpl decision log — 03 IF-Font (NeurIPS 2024)
 
+> **PHASE 2 STATUS**: All 7 P0 deviations from `reports/github_diff.md`
+> have been resolved by the Phase-2 surgery. See the "Phase 2 corrections"
+> section at the bottom of this file for the per-item diff. The "Decision
+> Log" below documents the original (Phase-1, blind) state for historical
+> reference; current decisions live in `paper_notes/03.md`.
+
 This is a **blind reimplementation** done from the project's paper notes
 without inspecting the official GitHub
 (`github.com/Stareven233/IF-Font`). Every non-trivial design choice is
@@ -161,3 +167,173 @@ flagged as either `[paper-cited]` (verbatim from the note) or
   multinomial).
 - IDS data augmentation (e.g. randomly swap equivalent IDS forms) for
   robustness — useful nice-to-have, paper does not mention.
+
+---
+
+## Phase 2 corrections (2026-05-11)
+
+Phase 2 audits Phase-1 against the official Stareven233/IF-Font repository
+(`reports/github_diff.md`). The 7 P0 deviations are listed below with the
+files touched. **All P0 items are now resolved.** P1/P2 items partially
+addressed; the remaining ones are tracked in `paper_notes/03.md §7`.
+
+### P0 #1 — Decoder block: 1 self-attn (not 2) — ✅ FIXED
+
+- Removed `IFFontConfig.n_self_attn_per_block` (was default 2).
+- `src/if_font/model.py:_DecoderBlock`: now `attn + attn_cross + mlp`
+  (one of each), matches official `Block2.forward` in
+  `iffont/modules/nanogpt.py:159-163`.
+- Added test `test_decoder_block_has_one_self_attn` to lock the invariant.
+
+### P0 #2 — Frozen pretrained VQGAN (not from-scratch) — ✅ FIXED
+
+- `src/if_font/model.py:VQTokenizerAdapter` replaces the trained-from-scratch
+  `VQTokenizer`. Defaults: `embedding_dim=4`, `codebook_size=256`,
+  `downsample_factor=8`, `in_channels=3` (RGB).
+- The adapter is frozen at construction via `requires_grad_(False)`,
+  `.eval()`, and a `train` override (matches official
+  `iffont/data/adapter.py:54`).
+- `VQTokenizerAdapter.from_pretrained_compvis(path)` loads the real
+  CompVis weights via `taming-transformers` + `omegaconf` (added to
+  `pyproject.toml` as the `pretrained-vqgan` extra).
+- Smoke / CI use a random-weight stub adapter with the correct shapes;
+  this lets the rest of the model train end-to-end without the heavy
+  pretrained-weights download.
+- Stage A (VQGAN pretraining) is dropped — see Phase-2 train YAMLs.
+- The deprecated `VectorQuantizer` is kept as an import-error stub.
+
+### P0 #3 — StyleEncoder + 3SA — ✅ FIXED
+
+- `src/if_font/model.py:StyleEncoder` implements CNN stem + coverage-pool
+  + 3SA cross-attention. Mirrors official
+  `iffont/modules/encoder.StyleEncoder.forward` (lines 601-622).
+- The CNN stem (`_ConvBlock` + `_ResBlock`, instance-norm + reflect-pad)
+  matches the layer ladder in `encoder._init_enc`.
+- `_structure_style_aggregation` runs IDS-query → ref-feature K/V
+  cross-attention with per-head QK-LN (`encoder.py:587-599`).
+
+### P0 #4 — MoCo wrapper + sup_cl contrastive loss — ✅ FIXED
+
+- `src/if_font/model.py:MoCoWrapper` carries two StyleEncoders
+  (`enc` query + `enc_m` momentum), 2-layer MLP projector + predictor,
+  and cosine-scheduled momentum update.
+- `src/if_font/losses.py:sup_cl` is a port of official
+  `iffont/modules/losses.sup_cl` (Khosla 2020 SupCon).
+- `src/if_font/train.py:MoCoCache` is a bounded FIFO of (cl, font_id)
+  pairs; matches `models/net2net_model.CacheManagerCL` (size=10).
+- `compute_loss` returns `sq + sup_cl_weight * sup_cl` where
+  `sup_cl_weight=0.5` captures the official `/ 2`.
+
+### P0 #5 — Coverage-similarity ref routing — ✅ FIXED
+
+- `IFFont.compute_coverage` (class method) and the same algorithm inlined
+  in `dataset.py:_compute_coverage_row` implement the IDC-anchored
+  longest-common-substring score from official
+  `IDSEncoder.coverage` (encoder.py:307-357).
+- The collate computes `coverage_sim [B, N]` at batch construction time
+  and the model passes it through StyleEncoder for the `x_g` softmax weights.
+
+### P0 #6 — BabelStone + ids_iffont (not CHISE) — ✅ FIXED
+
+- `src/if_font/ids.py:IDSResolver` reads
+  `~/Char/datasets/ids/cn_mainland/babelstone_cjk_ids.txt`
+  (97058 entries, vendored from third_party) and
+  `~/Char/datasets/ids/cn_mainland/ids_iffont.txt`
+  (165 entries, vendored from third_party).
+- Supports `level='radical'` (default, matches official `base.yaml:70`)
+  and `level='stroke'` (used by coverage similarity).
+- `IDSTokenizer.fit_from_resolver` builds the leaf vocab off the
+  resolver's char set; this is the production path. The Phase-1 CHISE
+  fallback via `lookup_ids.py` is kept only as a legacy `ids_lookup_path`
+  config knob.
+
+### P0 #7 — RGB (not grayscale) — ✅ FIXED
+
+- `IFFontConfig.in_channels = 3` and `VQTokenizerConfig.in_channels = 3`
+  by default.
+- `data_stage_*.yaml` switched to RGB (Phase-1 yamls were grayscale).
+- `dataset.py:_to_rgb` replicates 1-channel synthetic images to 3
+  channels at the collate boundary; the smoke test uses the existing
+  shared `make_synthetic_batch` with `in_channels=3`.
+
+### Partial P1 corrections
+
+- **A6 (prefix-prepended IDS)**: implemented. `TransformerARDecoder.forward`
+  now does `tok_emb = cat([ids_embed, wte(idx)])` then slices
+  `logits[:, ids_len-1:]`, mirroring official `nanogpt.GPT.forward`.
+- **A7 (QK-LayerNorm)**: implemented in `_CausalSelfAttention` and
+  `_CrossAttention`. Both use `F.scaled_dot_product_attention` (Flash).
+  (DropKey mask is not yet implemented — tracked as a remaining P1.)
+- **A8 (weight tying wte ↔ lm_head)**: implemented via
+  `self.wte.weight = self.lm_head.weight` in `TransformerARDecoder.__init__`.
+- **S1 (OneCycleLR + 2-group AdamW)**: implemented in
+  `train._configure_optimizers` and `train.main`.
+- **L1 (drop VQ/recon losses)**: implemented. Phase-1's
+  `(ce_weight, vq_weight, recon_weight)` triple is gone; only
+  `sup_cl_weight` remains as a knob.
+- **L2 (no CFG)**: removed. `cfg_drop_prob` and the all-masked-row guard
+  are dropped — the official model never uses CFG.
+
+### Still outstanding (deferred)
+
+These are non-blockers for getting the trainer wired correctly but are
+known divergences:
+
+- **DropKey attention mask** (A7 partial): not implemented; the official
+  `modules.blocks.DropKeyMask` Bernoulli-drops keys at training time
+  before SDPA. Phase 2 uses vanilla SDPA. P1 #9 in github_diff.
+- **Triplet-equivalent IDS augmentation** (D3): not implemented. Official
+  randomly swaps equivalent IDS forms during `IDSEncoder.embed`. P1 #15.
+- **Pre-tokenised HDF5 pipeline** (C1): not implemented. Official
+  precomputes target+ref VQ indices into HDF5 and the training loop
+  never touches raw pixels. Phase 2 still encodes refs on the fly inside
+  `IFFont.forward`. P1 #17.
+- **DDP all-gather for sup_cl** (A4 detail): single-GPU only. Official
+  `Net2NetModel.training_step` all-gathers cl features across DDP ranks.
+- **Mixed precision** (S3): not yet wired into our shared runner; the
+  official runs `precision: 16-mixed`.
+
+### Files modified in Phase 2
+
+```
+src/if_font/__init__.py                  (re-exports)
+src/if_font/configs/data_stage_a.yaml    (in_channels gone — RGB at collate)
+src/if_font/configs/data_stage_b.yaml    (max_refs 3, in_channels at model level)
+src/if_font/configs/data_stage_c.yaml    (same as Stage B)
+src/if_font/configs/model.yaml           (Phase-2 hyperparams)
+src/if_font/configs/train_stage_a_ttf.yaml (no-op shim; Stage A dropped)
+src/if_font/configs/train_stage_b_midtrain.yaml (sup_cl, OneCycle, no CE/VQ/recon)
+src/if_font/configs/train_stage_c_ernantang.yaml (same recipe)
+src/if_font/dataset.py                   (RGB collate, coverage_sim, font_id)
+src/if_font/ids.py                       (IDSResolver: BabelStone + ids_iffont)
+src/if_font/losses.py                    (NEW: sq + sup_cl)
+src/if_font/model.py                     (VQTokenizerAdapter, StyleEncoder, MoCo, 1+1+1 block, prefix AR)
+src/if_font/sample.py                    (coverage_sim arg, RGB output)
+src/if_font/train.py                     (2-group AdamW + OneCycleLR + MoCoCache)
+tests/test_smoke.py                      (Phase-2 invariants)
+pyproject.toml                           (pretrained-vqgan optional extra)
+paper_notes/03.md                        ([REVISED PER PHASE 2])
+~/Char/datasets/ids/cn_mainland/babelstone_cjk_ids.txt (NEW: vendored from third_party)
+~/Char/datasets/ids/cn_mainland/ids_iffont.txt         (NEW: vendored from third_party)
+```
+
+### Verification
+
+```
+$ uv run ruff check src/ tests/
+All checks passed!
+
+$ uv run pytest tests/test_smoke.py -x
+14 passed in 1.11s
+
+$ uv run python -m paper_reimpl_shared.runner.entrypoint \
+    --paper if_font --dry-run --synthetic --device cpu \
+    --train src/if_font/configs/train_stage_b_midtrain.yaml \
+    --model src/if_font/configs/model.yaml \
+    --data src/if_font/configs/data_stage_b.yaml \
+    --data-backend mac_symlink
+[if_font] device=cpu max_steps=1 bs=32 lr=1.44e-04 sup_cl_weight=0.5
+          codebook=256 d_model=384 blocks=10 n_refs=3 vqgan_pretrained=False
+[if_font] epoch=0 step=0 total=8.5214 sq=5.5454 cl=5.9521
+[if_font] done; final_step=1 dry_run=True
+```

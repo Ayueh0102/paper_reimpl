@@ -1,14 +1,22 @@
 # Stage C — Ernantang target-style Transformer fine-tune.
+#
+# Final anneal stage for Plan A. Lower lr + smaller batch for the
+# style-specific data.
 stage: transformer
 seed: 42
 batch_size: 16
-num_workers: 2
-learning_rate: 5.0e-5
+num_workers: 4
+g_lr: 5.0e-5
+adam_betas: [0.0, 0.9]
 weight_decay: 0.0
 grad_clip: 1.0
 max_epochs: 1
 max_steps: 100000
 log_every: 200
-structure_weight: 0.3
+scheduler:
+  type: step
+  step_size: 10000
+  gamma: 0.95
+freeze_vqgan: partial
 vqgan_ckpt: experiments/04_vq_font/outputs/stage_0_vqgan/vqgan_last.pt
 ckpt_dir: experiments/04_vq_font/outputs/stage_c_transformer

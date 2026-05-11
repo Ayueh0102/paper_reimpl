@@ -1,24 +1,28 @@
-# Stage A training schedule — VQ codebook pretrain on TTF renders.
+# Stage A — NO-OP in Phase 2 (VQGAN is now frozen pretrained CompVis).
 #
-# In Stage A we only train the VQ tokenizer (encoder + codebook + decoder),
-# so ce_weight = 0 disables the AR cross-entropy.
-# - timesteps n/a (IF-Font is AR, not diffusion)
-# - paper-cited training: batch 128, 15 epochs, AdamW + cosine. Here we
-#   keep batch_size 16 + grad_accum-style scaling, easy to bump on real GPUs.
+# Kept as a back-compat shim. Setting `max_steps: 0` means the loop will not
+# execute training; the entrypoint still constructs the model + checkpoint
+# directory so downstream scripts that probe `experiments/03_if_font/outputs/stage_a`
+# do not blow up.
 seed: 42
-batch_size: 16
+batch_size: 8
 num_workers: 0
-learning_rate: 1.0e-4
-weight_decay: 0.0
-grad_clip: 1.0
-max_epochs: 1
-max_steps: 5000
+base_learning_rate: 4.5e-6
+weight_decay: 0.01
+grad_clip: 0.0
+max_epochs: 0
+max_steps: 0
 log_every: 50
-cfg_drop_prob: 0.0              # CFG drop unused in Stage A (no IDS use yet)
 
-# Loss weights — Stage A: VQ + recon, no AR yet.
-ce_weight: 0.0
-vq_weight: 1.0
-recon_weight: 1.0
+# Phase-2 loss weight; sup_cl is inactive when refs are zero / batch all-same-font.
+sup_cl_weight: 0.5
+
+# IDS resolver: BabelStone + ids_iffont (vendored).
+babelstone_path: ~/Char/datasets/ids/cn_mainland/babelstone_cjk_ids.txt
+ids_iffont_path: ~/Char/datasets/ids/cn_mainland/ids_iffont.txt
+
+# Optional pretrained VQGAN path (e.g. ../checkpoints/vqgan_openImages_f8_n256).
+# Leave empty to use the random-weight stub (smoke-only).
+vqgan_path: ""
 
 ckpt_dir: experiments/03_if_font/outputs/stage_a

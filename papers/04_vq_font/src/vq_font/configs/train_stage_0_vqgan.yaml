@@ -1,21 +1,39 @@
-# Stage 0 — VQGAN font codebook pretrain.
+# Stage 0 — VQGAN font codebook pretrain (paper-faithful).
 #
-# Paper-cited:
-#   - 200,000 iterations on 1x A6000
-#   - Adam, lr 4e-5
-#   - batch_size 32
-#   - codebook size 1024
-# Other numbers are [guessed-because-paper-vague]; see reports/blind_impl.md.
+# Mirrors `vqgan/custom_vqgan.yaml` of the official repo:
+#   - target latent: 16x16x256 with codebook K=1024
+#   - loss: VQLPIPSWithDiscriminator (L1 + LPIPS + hinge GAN + codebook)
+#   - disc_start = 10000, disc_weight = 0.8, codebook_weight = 1.0
+#   - perceptual_weight = 1.0, disc_in_channels = 1 (grayscale)
+#   - Adam(betas=(0.5, 0.9)) on both G and D
+# Iteration count is not pinned in the official YAML (it uses
+# PyTorch-Lightning defaults via train_vqgan.sh). We default to a long
+# pretrain; reduce on local lab GPUs as needed.
 stage: vqgan
 seed: 42
-batch_size: 32
-num_workers: 2
-learning_rate: 4.0e-5
+batch_size: 8                         # official `vqgan/custom_vqgan.yaml:33`
+num_workers: 4
+g_lr: 4.5e-6                          # official `base_learning_rate`
+d_lr: 4.5e-6
+adam_betas: [0.5, 0.9]                # `taming/models/vqgan.py:124-129`
 weight_decay: 0.0
 grad_clip: 1.0
 max_epochs: 1
-max_steps: 200000                     # paper-cited 200k iters
+max_steps: 300000                     # generous default; not pinned in official YAML
 log_every: 100
-recon_weight: 1.0
-vq_weight: 1.0
+# When `simple_loss=True` (or `--dry-run`), the trainer falls back to pure
+# L1 + commitment loss (no LPIPS download, no discriminator). Use for
+# smoke tests / fast plumbing checks.
+simple_loss: false
+# Discriminator + LPIPS hyperparameters (matches `vqgan/custom_vqgan.yaml`).
+loss:
+  disc_start: 10000                   # GAN starts at step 10k
+  disc_weight: 0.8                    # discriminator weight
+  codebook_weight: 1.0
+  pixelloss_weight: 1.0
+  perceptual_weight: 1.0
+  disc_num_layers: 3
+  disc_in_channels: 1                 # grayscale glyphs
+  disc_ndf: 64
+  disc_loss: hinge
 ckpt_dir: experiments/04_vq_font/outputs/stage_0_vqgan

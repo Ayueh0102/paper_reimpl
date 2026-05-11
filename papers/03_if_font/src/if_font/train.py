@@ -1,27 +1,24 @@
-"""IF-Font training — blind reimplementation.
+"""IF-Font training — Phase 2 alignment.
 
-Plumbed for the shared entrypoint
-``paper_reimpl_shared.runner.entrypoint``:
-  ``main(args, *, data_cfg, model_cfg, train_cfg, paths)``.
+Loss = `sq` (CE on next-VQ-token) + `sup_cl` (supervised contrastive over
+MoCo style features). Phase-1's (CE, VQ commitment, recon MSE) triple is
+gone — VQGAN is frozen pretrained, so commitment + recon do not apply.
 
-Loss (paper §3, p.1):
-  L = ce_weight * L_AR + vq_weight * L_VQ + recon_weight * L_recon
-
-  * L_AR    : cross-entropy on next-VQ-token prediction (the paper's main loss).
-  * L_VQ    : VQ commitment loss (only active when VQ is being trained; ~ Stage A).
-  * L_recon : MSE reconstruction loss from VQ decoder (active in Stage A).
-
-Stage-A YAML sets ce_weight=0, vq_weight=1, recon_weight=1 → pure VQGAN
-pretraining of the codebook.
-Stage-B/C YAML sets ce_weight=1, vq_weight=0, recon_weight=0 (and may
-freeze the VQ encoder/decoder) → AR training on (IDS, refs) → target tokens.
+Optimiser & schedule:
+  * Two AdamW groups:
+      - decoder ("netTransformer") params: betas=(0.9, 0.95), weight_decay=0.01
+      - everything else (IDS embeddings, MoCo): betas=(0.9, 0.999)
+  * OneCycleLR with `pct_start = 0.5 / max_epochs`, `final_div_factor = 10/25`.
+  * No grad clip by default (official does not set one).
 """
 
 from __future__ import annotations
 
+import collections
 import dataclasses
 import os
 import random
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -31,11 +28,38 @@ from paper_reimpl_shared.config import resolve_path
 from paper_reimpl_shared.data.manifest import BackendPaths
 from torch.utils.data import DataLoader
 
+from . import losses
 from .dataset import IFFontCollate, build_dataset, load_ids_lookup
-from .ids import IDSTokenizer
-from .model import IFFont, IFFontConfig, VQTokenizerConfig, build_if_font
+from .ids import IDSResolver, IDSTokenizer
+from .model import IFFont, IFFontConfig, VQTokenizerAdapter, VQTokenizerConfig, build_if_font
 
-__all__ = ["compute_loss", "main"]
+__all__ = ["MoCoCache", "compute_loss", "main"]
+
+
+# --------------------------------------------------------------------------------------
+# MoCo cache queue (replaces Phase-1 in-batch sup_cl)
+# --------------------------------------------------------------------------------------
+
+
+class MoCoCache:
+    """Bounded FIFO cache of (cl_q+cl_m, font_id) pairs.
+
+    Mirrors official `models/net2net_model.CacheManagerCL` (size=10 batches).
+    """
+
+    def __init__(self, max_batches: int = 10) -> None:
+        self.max_batches = max_batches
+        self.cl_buf: deque[torch.Tensor] = deque(maxlen=max_batches)
+        self.id_buf: deque[torch.Tensor] = deque(maxlen=max_batches)
+
+    def push(self, cl: torch.Tensor, font_id: torch.Tensor) -> None:
+        self.cl_buf.append(cl.detach())
+        self.id_buf.append(font_id.detach())
+
+    def pop_concat(self) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if not self.cl_buf:
+            return None, None
+        return torch.cat(list(self.cl_buf), dim=0), torch.cat(list(self.id_buf), dim=0)
 
 
 # --------------------------------------------------------------------------------------
@@ -47,59 +71,63 @@ def compute_loss(
     *,
     model: IFFont,
     batch: dict[str, torch.Tensor],
-    ce_weight: float = 1.0,
-    vq_weight: float = 1.0,
-    recon_weight: float = 1.0,
-    cfg_drop_prob: float = 0.0,
+    cache: MoCoCache | None = None,
+    sup_cl_weight: float = 0.5,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """Compute IF-Font's composite loss.
+    """IF-Font Phase-2 loss: `sq + sup_cl_weight * sup_cl`.
 
-    Args:
-        model: ``IFFont`` instance.
-        batch: dict with keys ``image``, ``refs`` (or ``ref_images``), and
-            optional ``ids_token_ids`` + ``ids_attention_mask``.
-        ce_weight, vq_weight, recon_weight: scalar weights.
-        cfg_drop_prob: probability of dropping the IDS conditioning per
-            sample (classifier-free guidance training). Refs are kept.
+    Official `Net2NetModel.training_step`:
+        l_sq = losses.sq(logits, x)
+        l_cl = losses.sup_cl(cl_s, labels=font_id) / 2     # weight 0.5
+        return l_sq + l_cl
+
+    The `/2` in the official is captured here via `sup_cl_weight=0.5`.
+
+    `batch` must contain (Phase-2 collate emits all of these):
+      * image, refs/ref_images, ids_token_ids, coverage_sim, font_id
     """
     image = batch["image"]
     ref_images = batch.get("refs") if "refs" in batch else batch.get("ref_images")
-    if ref_images is not None and ref_images.numel() == 0:
-        ref_images = None
-    ids_token_ids = batch.get("ids_token_ids")
-    ids_attention_mask = batch.get("ids_attention_mask")
+    ids_token_ids = batch["ids_token_ids"]
+    coverage_sim = batch["coverage_sim"]
+    font_id = batch.get("font_id", batch.get("writer_id"))
 
-    if cfg_drop_prob > 0.0 and ids_attention_mask is not None and ids_token_ids is not None:
-        b = ids_attention_mask.shape[0]
-        drop = torch.rand(b, device=ids_attention_mask.device) < cfg_drop_prob
-        # Zeroing the attention mask effectively makes the IDS branch a no-op
-        # for the dropped rows (the masked-softmax will not be used).
-        ids_attention_mask = ids_attention_mask.clone()
-        ids_attention_mask[drop, :] = False
+    if ref_images is None or ref_images.numel() == 0:
+        raise ValueError("IF-Font Phase 2 requires at least one reference glyph.")
 
     out = model(
         target_image=image,
         ids_token_ids=ids_token_ids,
-        ids_attention_mask=ids_attention_mask,
         ref_images=ref_images,
+        coverage_sim=coverage_sim,
     )
+    logits = out["logits"]
+    target_ids = out["target_ids"]
 
-    logits = out["logits"]  # [B, N, K]
-    target_ids = out["target_ids"]  # [B, N]
+    l_sq = losses.sq(logits, target_ids)
 
-    ce = torch.nn.functional.cross_entropy(
-        logits.reshape(-1, logits.shape[-1]),
-        target_ids.reshape(-1),
-        reduction="mean",
-    )
-    vq = out["vq_loss"]
-    rec = out["recon_loss"]
-    total = ce_weight * ce + vq_weight * vq + recon_weight * rec
+    l_cl_val = torch.zeros((), device=logits.device)
+    if model.training and out["cl"] is not None and font_id is not None:
+        cl = out["cl"]  # [B, 2, dim]
+        if cache is not None:
+            # Concat with stale entries first, then push the fresh batch.
+            stale_cl, stale_id = cache.pop_concat()
+            cache.push(cl, font_id)
+            if stale_cl is not None and stale_id is not None:
+                cl_all = torch.cat([cl, stale_cl.to(cl.device)], dim=0)
+                id_all = torch.cat([font_id, stale_id.to(font_id.device)], dim=0)
+            else:
+                cl_all, id_all = cl, font_id
+        else:
+            cl_all, id_all = cl, font_id
+        l_cl_val = losses.sup_cl(cl_all, labels=id_all)
+
+    total = l_sq + sup_cl_weight * l_cl_val
+
     log = {
         "loss_total": float(total.detach().cpu()),
-        "loss_ce": float(ce.detach().cpu()),
-        "loss_vq": float(vq.detach().cpu()),
-        "loss_recon": float(rec.detach().cpu()),
+        "loss_sq": float(l_sq.detach().cpu()),
+        "loss_cl": float(l_cl_val.detach().cpu()) if isinstance(l_cl_val, torch.Tensor) else 0.0,
     }
     return total, log
 
@@ -121,13 +149,10 @@ def _vq_cfg_from_yaml(m: dict[str, Any]) -> VQTokenizerConfig:
     vq = m.get("vq", {})
     return VQTokenizerConfig(
         image_size=int(m.get("image_size", 128)),
-        in_channels=int(m.get("in_channels", 1)),
-        base_channels=int(vq.get("base_channels", 64)),
-        channel_mult=tuple(int(x) for x in vq.get("channel_mult", [1, 2, 2, 4])),
-        embedding_dim=int(vq.get("embedding_dim", 256)),
+        in_channels=int(m.get("in_channels", 3)),
+        embedding_dim=int(vq.get("embedding_dim", 4)),
         codebook_size=int(vq.get("codebook_size", 256)),
-        commitment_weight=float(vq.get("commitment_weight", 0.25)),
-        decay=float(vq.get("decay", 0.99)),
+        downsample_factor=int(vq.get("downsample_factor", 8)),
     )
 
 
@@ -136,21 +161,29 @@ def _model_cfg_from_yaml(model_cfg: dict[str, Any]) -> IFFontConfig:
     vq_cfg = _vq_cfg_from_yaml(m)
     return IFFontConfig(
         image_size=int(m.get("image_size", 128)),
-        in_channels=int(m.get("in_channels", 1)),
+        in_channels=int(m.get("in_channels", 3)),
         vq=vq_cfg,
         ids_vocab_size=int(m.get("ids_vocab_size", 1024)),
-        ids_max_len=int(m.get("ids_max_len", 32)),
-        ids_encoder_layers=int(m.get("ids_encoder_layers", 2)),
-        ids_encoder_heads=int(m.get("ids_encoder_heads", 4)),
-        ids_encoder_dim=int(m.get("ids_encoder_dim", 384)),
+        ids_max_len=int(m.get("ids_max_len", 35)),
         d_model=int(m.get("d_model", 384)),
         n_heads=int(m.get("n_heads", 8)),
         n_blocks=int(m.get("n_blocks", 10)),
-        n_self_attn_per_block=int(m.get("n_self_attn_per_block", 2)),
         ffn_mult=int(m.get("ffn_mult", 4)),
-        dropout=float(m.get("dropout", 0.0)),
-        n_refs=int(m.get("n_refs", 1)),
+        dropout=float(m.get("dropout", 0.1)),
+        bias=bool(m.get("bias", False)),
+        n_refs=int(m.get("n_refs", 3)),
     )
+
+
+def _build_ids_resolver(train_cfg: dict[str, Any]) -> IDSResolver | None:
+    """Try to load BabelStone + ids_iffont. Return None if files absent."""
+    babel = train_cfg.get("babelstone_path") or "~/Char/datasets/ids/cn_mainland/babelstone_cjk_ids.txt"
+    iff = train_cfg.get("ids_iffont_path") or "~/Char/datasets/ids/cn_mainland/ids_iffont.txt"
+    bp = Path(babel).expanduser()
+    ip = Path(iff).expanduser()
+    if not bp.exists() and not ip.exists():
+        return None
+    return IDSResolver.load(level="radical", babelstone_path=bp, ids_iffont_path=ip)
 
 
 def _warm_fit_tokenizer(
@@ -159,18 +192,6 @@ def _warm_fit_tokenizer(
     *,
     max_samples: int | None = None,
 ) -> None:
-    """Pre-scan the dataset to populate the tokenizer vocab, then freeze.
-
-    This avoids the data-race where ``IFFontCollate._maybe_fit`` mutates the
-    tokenizer inside a DataLoader worker subprocess — the mutation would
-    never reach the main process. Pre-fitting + freezing is the correct
-    pattern for ``num_workers > 0`` runs.
-
-    The warm pass uses each row's ``ids_string`` field (added either by
-    ``IFFontDataset._fetch`` or ``_SyntheticIFFontDataset.__getitem__``).
-    Falls back to a per-index dataset iteration; we keep this simple and
-    sequential since it runs once at startup.
-    """
     n = len(dataset)
     if max_samples is not None:
         n = min(n, int(max_samples))
@@ -178,7 +199,7 @@ def _warm_fit_tokenizer(
     for i in range(n):
         try:
             row = dataset[i]
-        except Exception:  # pragma: no cover — degraded mode for sparse datasets
+        except Exception:  # pragma: no cover
             continue
         s = row.get("ids_string", "") if isinstance(row, dict) else ""
         if s:
@@ -195,6 +216,7 @@ def _build_dataloader(
     train_cfg: dict[str, Any],
     paths: BackendPaths,
     tokenizer: IDSTokenizer,
+    ids_resolver: IDSResolver | None,
 ) -> DataLoader:
     ids_lookup = load_ids_lookup(data_cfg.get("ids_lookup_path"))
     dataset = build_dataset(
@@ -203,27 +225,29 @@ def _build_dataloader(
         model_cfg=model_cfg,
         paths=paths,
         ids_lookup=ids_lookup,
+        ids_resolver=ids_resolver,
     )
     bs = int(train_cfg.get("batch_size", 4))
     nw = int(train_cfg.get("num_workers", 0))
     if getattr(args, "dry_run", False):
         nw = 0
 
-    # Warm-fit the tokenizer BEFORE the DataLoader is constructed so that
-    # `num_workers > 0` is safe (worker-side vocab growth would not reach
-    # the main process). If the tokenizer is already frozen by the caller,
-    # _warm_fit_tokenizer is a no-op.
     if not tokenizer.is_frozen:
-        _warm_fit_tokenizer(
-            tokenizer,
-            dataset,
-            max_samples=int(train_cfg.get("tokenizer_warm_fit_max_samples", 0)) or None,
-        )
+        if ids_resolver is not None:
+            tokenizer.fit_from_resolver(ids_resolver)
+            tokenizer.freeze()
+        else:
+            _warm_fit_tokenizer(
+                tokenizer,
+                dataset,
+                max_samples=int(train_cfg.get("tokenizer_warm_fit_max_samples", 0)) or None,
+            )
 
     collate = IFFontCollate(
         tokenizer=tokenizer,
-        max_refs=int(data_cfg.get("max_refs", 1)),
+        max_refs=int(data_cfg.get("max_refs", model_cfg.n_refs)),
         ids_max_len=int(model_cfg.ids_max_len),
+        in_channels=int(model_cfg.in_channels),
         fit_on_first_call=False,
     )
     return DataLoader(
@@ -246,26 +270,44 @@ def _move_batch(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
     return out
 
 
+def _configure_optimizers(model: IFFont, lr: float, weight_decay: float):
+    """Two-group AdamW (matches official `Net2NetModel.configure_optimizers`)."""
+    decoder_params = list(model.decoder.parameters())
+    other_params = [
+        p for n, p in model.named_parameters()
+        if not n.startswith("decoder.") and p.requires_grad
+    ]
+    optim = torch.optim.AdamW(
+        [
+            {"params": decoder_params, "betas": (0.9, 0.95), "weight_decay": weight_decay},
+            {"params": other_params, "betas": (0.9, 0.999), "weight_decay": weight_decay},
+        ],
+        lr=lr,
+    )
+    return optim
+
+
 def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
-    """Entrypoint dispatched from paper_reimpl_shared.runner.entrypoint."""
     device = torch.device(args.device)
     _seed_everything(int(train_cfg.get("seed", 42)))
 
     cfg = _model_cfg_from_yaml(model_cfg)
+    ids_resolver = _build_ids_resolver(train_cfg)
 
-    # Build tokenizer with the IDC-only vocab. The DataLoader builder runs
-    # a warm fit pass over the dataset's IDS strings BEFORE constructing
-    # the DataLoader and then freezes the tokenizer, which keeps multi-
-    # worker training safe (worker-side mutation would not reach the main
-    # process). Paper specifies IDS but not the dict source — we use the
-    # CHISE-derived CNS table via ids_lookup_path.
     tokenizer = IDSTokenizer.from_idc_only()
-    # Pad the model vocab so the IDS embedding table can fit the warm-fit
-    # vocab size with headroom for occasional manifest churn.
-    _IDS_VOCAB_HEADROOM = 4096  # upper bound on unique CJK leaf components
+    if ids_resolver is not None:
+        tokenizer.fit_from_resolver(ids_resolver)
+    _IDS_VOCAB_HEADROOM = 4096
     cfg.ids_vocab_size = max(cfg.ids_vocab_size, tokenizer.vocab_size + _IDS_VOCAB_HEADROOM)
 
-    model = build_if_font(cfg).to(device)
+    # VQ tokenizer: load pretrained CompVis if a path is provided, otherwise
+    # use the stub adapter (random weights, correct shape).
+    vq_path = train_cfg.get("vqgan_path")
+    if vq_path:
+        vq_adapter = VQTokenizerAdapter.from_pretrained_compvis(str(Path(vq_path).expanduser()))
+    else:
+        vq_adapter = VQTokenizerAdapter(cfg.vq)
+    model = build_if_font(cfg, vq_adapter=vq_adapter).to(device)
 
     loader = _build_dataloader(
         args=args,
@@ -274,37 +316,42 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
         train_cfg=train_cfg,
         paths=paths,
         tokenizer=tokenizer,
+        ids_resolver=ids_resolver,
     )
-    # Sanity check: after warm-fit, the tokenizer must still fit the
-    # model's embedding table.
     if tokenizer.vocab_size > cfg.ids_vocab_size:
         raise ValueError(
             f"IDS tokenizer vocab ({tokenizer.vocab_size}) exceeds model "
-            f"ids_vocab_size ({cfg.ids_vocab_size}); increase vocab headroom."
+            f"ids_vocab_size ({cfg.ids_vocab_size})"
         )
 
-    lr = float(train_cfg.get("learning_rate", 2.0e-4))
-    optim = torch.optim.AdamW(
-        model.parameters(),
-        lr=lr,
-        betas=(0.9, 0.95),
-        weight_decay=float(train_cfg.get("weight_decay", 0.05)),
-    )
-    grad_clip = float(train_cfg.get("grad_clip", 1.0))
-    cfg_drop = float(train_cfg.get("cfg_drop_prob", 0.0))
-    ce_weight = float(train_cfg.get("ce_weight", 1.0))
-    vq_weight = float(train_cfg.get("vq_weight", 1.0))
-    recon_weight = float(train_cfg.get("recon_weight", 1.0))
+    base_lr = float(train_cfg.get("base_learning_rate", 4.5e-6))
+    bs = int(train_cfg.get("batch_size", 4))
+    accum = int(train_cfg.get("accumulate_grad_batches", 1))
+    # Official `run.py:23-25`: lr = accumulate * bs * base_lr.
+    lr_raw = train_cfg.get("learning_rate", "")
+    lr = float(lr_raw) if (lr_raw not in ("", None)) else base_lr * bs * accum
+    weight_decay = float(train_cfg.get("weight_decay", 0.01))
+    optim = _configure_optimizers(model, lr=lr, weight_decay=weight_decay)
 
-    # Freeze the VQ codebook outside Stage A. In Stage B/C the AR target is
-    # the codebook indices; if the codebook EMA keeps updating, the CE target
-    # drifts under the AR objective. Defaults: freeze when both vq_weight and
-    # recon_weight are zero (the canonical Stage B/C config); explicit
-    # `freeze_codebook` in train YAML overrides.
-    default_freeze = (vq_weight == 0.0 and recon_weight == 0.0)
-    freeze_codebook = bool(train_cfg.get("freeze_codebook", default_freeze))
-    model.vq.quantizer.update_codebook = not freeze_codebook
-    max_steps = int(train_cfg.get("max_steps", 1 if args.dry_run else 1_000_000))
+    max_epochs = int(train_cfg.get("max_epochs", 15))
+    max_steps_yaml = int(train_cfg.get("max_steps", 1 if args.dry_run else 1_000_000))
+    steps_per_epoch = max(1, len(loader))
+    total_steps = min(max_steps_yaml, max_epochs * steps_per_epoch) if not args.dry_run else 1
+
+    pct_start = 0.5 / max(1, max_epochs)
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optim,
+        max_lr=lr,
+        total_steps=max(2, total_steps),  # OneCycleLR needs >=2 steps
+        pct_start=min(0.5, max(1e-3, pct_start)),
+        final_div_factor=10.0 / 25.0,
+    )
+
+    sup_cl_weight = float(train_cfg.get("sup_cl_weight", 0.5))
+    grad_clip = float(train_cfg.get("grad_clip", 0.0))
+    moco_cache_size = int(train_cfg.get("moco_cache_size", 10))
+    cache = MoCoCache(max_batches=moco_cache_size)
+
     log_every = int(train_cfg.get("log_every", 50))
 
     ckpt_dir = train_cfg.get("ckpt_dir")
@@ -313,49 +360,55 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
         os.makedirs(ckpt_dir, exist_ok=True)
 
     print(
-        f"[if_font] device={device} steps={max_steps} bs={train_cfg.get('batch_size')} "
-        f"lr={lr} ce={ce_weight} vq={vq_weight} recon={recon_weight} cfg_drop={cfg_drop} "
-        f"codebook={cfg.vq.codebook_size} d_model={cfg.d_model} blocks={cfg.n_blocks} "
-        f"freeze_codebook={freeze_codebook}"
+        f"[if_font] device={device} max_steps={total_steps} bs={bs} lr={lr:.2e} "
+        f"sup_cl_weight={sup_cl_weight} codebook={cfg.vq.codebook_size} "
+        f"d_model={cfg.d_model} blocks={cfg.n_blocks} n_refs={cfg.n_refs} "
+        f"vqgan_pretrained={bool(vq_path)}"
     )
 
     model.train()
     step = 0
-    for _ in range(int(train_cfg.get("max_epochs", 1))):
+    for epoch in range(max_epochs):
         for batch in loader:
             batch = _move_batch(batch, device)
             optim.zero_grad(set_to_none=True)
             loss, log = compute_loss(
                 model=model,
                 batch=batch,
-                ce_weight=ce_weight,
-                vq_weight=vq_weight,
-                recon_weight=recon_weight,
-                cfg_drop_prob=cfg_drop,
+                cache=cache,
+                sup_cl_weight=sup_cl_weight,
             )
             loss.backward()
             if grad_clip > 0.0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optim.step()
+            if step + 1 < scheduler.total_steps:
+                scheduler.step()
+            # Cosine momentum schedule for MoCo (official: epoch / max_epochs).
+            model.moco_wrapper.momentum_update(epoch / max(1, max_epochs))
+
             if step % log_every == 0:
                 print(
-                    f"[if_font] step={step} total={log['loss_total']:.4f} "
-                    f"ce={log['loss_ce']:.4f} vq={log['loss_vq']:.4f} "
-                    f"recon={log['loss_recon']:.4f}"
+                    f"[if_font] epoch={epoch} step={step} total={log['loss_total']:.4f} "
+                    f"sq={log['loss_sq']:.4f} cl={log['loss_cl']:.4f}"
                 )
             step += 1
-            if step >= max_steps or args.dry_run:
+            if step >= total_steps or args.dry_run:
                 break
-        if step >= max_steps or args.dry_run:
+        if step >= total_steps or args.dry_run:
             break
 
     if ckpt_dir is not None and not args.dry_run:
         path = Path(ckpt_dir) / "if_font_last.pt"
-        # Use dataclasses.asdict to deep-convert the nested VQTokenizerConfig
-        # into a plain dict — cfg.__dict__ would leave the nested dataclass
-        # as a live object, which is brittle across class-definition changes.
-        torch.save({"model": model.state_dict(), "cfg": dataclasses.asdict(cfg)}, path)
+        torch.save(
+            {"model": model.state_dict(), "cfg": dataclasses.asdict(cfg)},
+            path,
+        )
         print(f"[if_font] saved checkpoint -> {path}")
 
     print(f"[if_font] done; final_step={step} dry_run={args.dry_run}")
     return 0
+
+
+# Silence unused-imports.
+_ = collections
