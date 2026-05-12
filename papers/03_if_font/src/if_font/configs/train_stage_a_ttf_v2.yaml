@@ -9,3 +9,6 @@ max_epochs: 1000
 max_steps: 200000
 log_every: 2000
 ckpt_dir: papers/03_if_font/outputs/stage_a_ttf_v2
+# Pretrained VQGAN (our own, 30k step on 13 OFL TTF). Replaces the random-init
+# stub adapter that caused sq=0 codebook collapse in the earlier v2 attempt.
+vqgan_local_path: papers/03_if_font/outputs/stage_vqgan/vqgan_last.pt

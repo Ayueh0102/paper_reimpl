@@ -309,12 +309,13 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
     vq_local = train_cfg.get("vqgan_local_path")
     if vq_local:
         import torch as _torch
+        vq_local_resolved = resolve_path(vq_local, base=Path(__file__).resolve().parents[4])
         vq_adapter = VQTokenizerAdapter(cfg.vq)
-        blob = _torch.load(str(Path(vq_local).expanduser()), map_location="cpu", weights_only=False)
+        blob = _torch.load(str(vq_local_resolved), map_location="cpu", weights_only=False)
         state = blob["model"] if isinstance(blob, dict) and "model" in blob else blob
         miss, unexp = vq_adapter.load_state_dict(state, strict=False)
         print(
-            f"[if_font] loaded local pretrained VQGAN from {vq_local} "
+            f"[if_font] loaded local pretrained VQGAN from {vq_local_resolved} "
             f"(missing={len(miss)} unexpected={len(unexp)})"
         )
         vq_adapter._freeze()
@@ -325,15 +326,21 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
     model = build_if_font(cfg, vq_adapter=vq_adapter).to(device)
 
     # Warm-start from --init-ckpt before optimizer build.
+    # IMPORTANT: filter out vq_adapter.* keys when a fresh local VQGAN is
+    # loaded — otherwise v1's random-stub VQGAN weights overwrite the new
+    # pretrained tokenizer and we're back at codebook collapse.
     init_ckpt = getattr(args, "init_ckpt", None)
     if init_ckpt:
         import torch as _torch
         blob = _torch.load(init_ckpt, map_location=device, weights_only=False)
         state = blob["model"] if isinstance(blob, dict) and "model" in blob else blob
+        if vq_local:
+            state = {k: v for k, v in state.items() if not k.startswith("vq.")}
         missing, unexpected = model.load_state_dict(state, strict=False)
         print(
             f"[if_font] warm-start from {init_ckpt} "
-            f"(missing={len(missing)} unexpected={len(unexpected)})"
+            f"(missing={len(missing)} unexpected={len(unexpected)}; "
+            f"vq_adapter.* filtered={bool(vq_local)})"
         )
 
     loader = _build_dataloader(
