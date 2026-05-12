@@ -62,6 +62,7 @@ dependencies = [
     { name = "paper-reimpl-shared" },
     { name = "peft" },
     { name = "pillow" },
+    { name = "pytest" },
     { name = "pyyaml" },
     { name = "tokenizers" },
     { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
@@ -69,9 +70,8 @@ dependencies = [
     { name = "transformers" },
 ]
 
-[package.optional-dependencies]
+[package.dev-dependencies]
 dev = [
-    { name = "pytest" },
     { name = "ruff" },
 ]
 
@@ -82,15 +82,16 @@ requires-dist = [
     { name = "paper-reimpl-shared", editable = "../../shared" },
     { name = "peft", specifier = ">=0.11" },
     { name = "pillow", specifier = ">=10.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pytest", specifier = ">=8.0" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
     { name = "tokenizers", specifier = ">=0.15" },
     { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32'", specifier = ">=2.1" },
     { name = "torch", marker = "sys_platform == 'linux' or sys_platform == 'win32'", specifier = ">=2.1", index = "https://download.pytorch.org/whl/cu128" },
     { name = "transformers", specifier = ">=4.40" },
 ]
-provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "ruff", specifier = ">=0.4" }]
 
 [[package]]
 name = "certifi"
