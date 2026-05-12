@@ -95,7 +95,10 @@ def _maybe_load_ckpt(
     if not path.exists():
         raise FileNotFoundError(f"[hfh_font] checkpoint not found: {path} (from {source})")
 
-    state = torch.load(path, map_location="cpu")
+    # weights_only=False because our VAE pretrain stores args (with
+    # pathlib.WindowsPath objects) alongside the state_dict; PyTorch 2.6+
+    # defaults to weights_only=True which rejects WindowsPath as unsafe.
+    state = torch.load(path, map_location="cpu", weights_only=False)
     # Accept either a raw state_dict or a {"model": ..., "optimizer": ...} blob.
     if isinstance(state, dict) and "model" in state and isinstance(state["model"], dict):
         sd = state["model"]
