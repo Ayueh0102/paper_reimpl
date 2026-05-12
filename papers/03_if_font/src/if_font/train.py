@@ -300,10 +300,25 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
     _IDS_VOCAB_HEADROOM = 4096
     cfg.ids_vocab_size = max(cfg.ids_vocab_size, tokenizer.vocab_size + _IDS_VOCAB_HEADROOM)
 
-    # VQ tokenizer: load pretrained CompVis if a path is provided, otherwise
-    # use the stub adapter (random weights, correct shape).
+    # VQ tokenizer: priority order
+    #   1. vqgan_local_path → load our own pretrained stub-adapter state_dict
+    #      (saved by scripts/pretrain_vqgan.py).
+    #   2. vqgan_path → load real CompVis vq-f8-n256 (needs taming-transformers).
+    #   3. fallback → stub adapter with random init (Phase-2 collapses to sq=0).
     vq_path = train_cfg.get("vqgan_path")
-    if vq_path:
+    vq_local = train_cfg.get("vqgan_local_path")
+    if vq_local:
+        import torch as _torch
+        vq_adapter = VQTokenizerAdapter(cfg.vq)
+        blob = _torch.load(str(Path(vq_local).expanduser()), map_location="cpu", weights_only=False)
+        state = blob["model"] if isinstance(blob, dict) and "model" in blob else blob
+        miss, unexp = vq_adapter.load_state_dict(state, strict=False)
+        print(
+            f"[if_font] loaded local pretrained VQGAN from {vq_local} "
+            f"(missing={len(miss)} unexpected={len(unexp)})"
+        )
+        vq_adapter._freeze()
+    elif vq_path:
         vq_adapter = VQTokenizerAdapter.from_pretrained_compvis(str(Path(vq_path).expanduser()))
     else:
         vq_adapter = VQTokenizerAdapter(cfg.vq)
@@ -375,7 +390,7 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
         f"[if_font] device={device} max_steps={total_steps} bs={bs} lr={lr:.2e} "
         f"sup_cl_weight={sup_cl_weight} codebook={cfg.vq.codebook_size} "
         f"d_model={cfg.d_model} blocks={cfg.n_blocks} n_refs={cfg.n_refs} "
-        f"vqgan_pretrained={bool(vq_path)}"
+        f"vqgan_pretrained={bool(vq_local or vq_path)} local={bool(vq_local)}"
     )
 
     model.train()
