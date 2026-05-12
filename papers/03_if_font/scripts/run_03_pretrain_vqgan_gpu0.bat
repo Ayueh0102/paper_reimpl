@@ -13,7 +13,8 @@ for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMddHHmmss"
 set LOG=D:\Char\ayueh\paper_reimpl\logs\03_pretrain_vqgan_%DT%.log
 
 cd /d %REPO%\papers\03_if_font
-uv run python scripts/pretrain_vqgan.py ^
+set PYTHONUNBUFFERED=1
+uv run python -u scripts/pretrain_vqgan.py ^
     --fonts-root "%FONTS%" ^
     --output "%OUT%" ^
     --steps 30000 ^
