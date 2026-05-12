@@ -368,7 +368,7 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
 
     ckpt_dir = train_cfg.get("ckpt_dir")
     if ckpt_dir is not None:
-        ckpt_dir = resolve_path(ckpt_dir, base=Path(__file__).resolve().parents[3])
+        ckpt_dir = resolve_path(ckpt_dir, base=Path(__file__).resolve().parents[4])
         os.makedirs(ckpt_dir, exist_ok=True)
 
     print(

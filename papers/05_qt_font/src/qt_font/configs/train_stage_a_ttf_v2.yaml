@@ -1,6 +1,6 @@
 # 05 Stage A v2 — 200k step warm-start from v1.
 seed: 42
-batch_size: 4
+batch_size: 1
 num_workers: 0
 learning_rate: 1.0e-4
 weight_decay: 0.0

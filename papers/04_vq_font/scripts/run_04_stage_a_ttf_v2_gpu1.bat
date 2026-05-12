@@ -8,7 +8,7 @@ set PAPER_DIR=%REPO%\papers\04_vq_font
 set DATA=%PAPER_DIR%\src\vq_font\configs\data_stage_a_ttf.yaml
 set MODEL=%PAPER_DIR%\src\vq_font\configs\model.yaml
 set TRAIN=%PAPER_DIR%\src\vq_font\configs\train_stage_a_ttf_v2.yaml
-set INIT=%PAPER_DIR%\outputs\stage_a_ttf_v1\vq_font_last.pt
+set INIT=%PAPER_DIR%\outputs\stage_a_ttf_v1\transformer_last.pt
 
 for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMddHHmmss"') do set DT=%%I
 set LOG=D:\Char\ayueh\paper_reimpl\logs\04_stage_a_ttf_v2_%DT%.log

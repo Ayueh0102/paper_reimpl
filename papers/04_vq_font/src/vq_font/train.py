@@ -389,7 +389,7 @@ def _run_vqgan_stage(
     log_every = int(train_cfg.get("log_every", 100))
     ckpt_dir = train_cfg.get("ckpt_dir")
     if ckpt_dir is not None:
-        ckpt_dir = resolve_path(ckpt_dir, base=Path(__file__).resolve().parents[3])
+        ckpt_dir = resolve_path(ckpt_dir, base=Path(__file__).resolve().parents[4])
         os.makedirs(ckpt_dir, exist_ok=True)
 
     logger.info(
@@ -530,7 +530,7 @@ def _try_load_vqgan_warmstart(
     vqgan_ckpt = train_cfg.get("vqgan_ckpt")
     if not vqgan_ckpt:
         return
-    ckpt_path = resolve_path(vqgan_ckpt, base=Path(__file__).resolve().parents[3])
+    ckpt_path = resolve_path(vqgan_ckpt, base=Path(__file__).resolve().parents[4])
     if ckpt_path.exists():
         _load_vqgan_ckpt(model, ckpt_path, strict=False)
         logger.info("[vq_font/transformer] loaded VQGAN ckpt: %s", ckpt_path)
@@ -587,7 +587,7 @@ def _run_transformer_stage(
     log_every = int(train_cfg.get("log_every", 100))
     ckpt_dir = train_cfg.get("ckpt_dir")
     if ckpt_dir is not None:
-        ckpt_dir = resolve_path(ckpt_dir, base=Path(__file__).resolve().parents[3])
+        ckpt_dir = resolve_path(ckpt_dir, base=Path(__file__).resolve().parents[4])
         os.makedirs(ckpt_dir, exist_ok=True)
 
     logger.info(
