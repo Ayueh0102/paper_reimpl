@@ -1,0 +1,21 @@
+# 02 Stage A v5 — 100k U-Net continuation from v3 ckpt with 10x lower LR.
+# v4 regressed (warm-start + OneCycleLR ramp to 1e-4 destroyed v3 features).
+# v5 fixes by using lr=1e-5 — 10x smaller peak so previously-converged
+# weights aren't blasted apart. bs stays at v3's 8 to preserve dynamic.
+stage: a
+seed: 42
+batch_size: 8
+num_workers: 4
+lr: 1.0e-5
+adam_betas: [0.9, 0.999]
+weight_decay: 0.01
+grad_clip: 1.0
+beta_schedule: linear
+beta_start: 1.0e-4
+beta_end: 2.0e-2
+cfg_dropout: 0.1
+max_epochs: 1000
+max_steps: 100000
+log_every: 2000
+freeze_vae: true
+ckpt_dir: papers/02_hfh_font/outputs/stage_a_ttf_v5
