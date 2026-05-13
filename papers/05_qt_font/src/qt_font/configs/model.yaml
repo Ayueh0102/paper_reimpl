@@ -3,14 +3,18 @@
 # Mirrors third_party/05_qt_font/configs/chinesefont_train.yaml MODEL block.
 # Numbers tagged in reports/blind_impl.md Phase 2 corrections section.
 model:
-  image_size: 128
+  image_size: 64
   in_channels: 1                # grayscale glyph
   content_channels: 1           # paper: contour-only single channel
   ref_channels: 1
 
   # Octree geometry.
   full_depth: 4                 # depths [0, full_depth] are dense
-  depth: 7                      # 128 px → 7; 256 px → 8; 512 px → 9
+  depth: 6                      # 64 px → 6; 128 px → 7; 256 px → 8
+  # 2026-05-13: paper default depth=7 (128px) OOMs at bs=4 because
+  # EdgeTypedGraphConv materialises W[edge_type] per edge — memory
+  # scales as n_edges × in_dim × out_dim. depth=6 quarters n_edges,
+  # should fit bs>=4 on a 48 GB card; image quality halved as cost.
   depth_stop: 4                 # U-Net bottleneck depth
   n_states: 3                   # {bg, contour, skeleton}
 
