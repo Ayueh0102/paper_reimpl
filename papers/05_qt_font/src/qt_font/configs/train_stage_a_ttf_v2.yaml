@@ -1,8 +1,10 @@
-# 05 Stage A v2 — 30k step warm-start from v1.
-# Cut from 200k to 30k after 200k attempt projected to take ~5 days
-# (quadtree depth=7 forward is much slower than other papers' U-Net).
+# 05 Stage A v2 — 30k step from scratch at depth=6 (image_size=64).
+# 2026-05-13:
+#   - depth 7 -> 6: quarters quadtree node count, allows bs>=4 instead of bs=1
+#   - drop warm-start (v1 ckpt was depth=7, shape mismatch)
+#   - bs 1 -> 8 (memory permits now)
 seed: 42
-batch_size: 1
+batch_size: 8
 num_workers: 4
 learning_rate: 1.0e-4
 weight_decay: 0.0
