@@ -1,10 +1,12 @@
 # 05 Stage A v2 — 30k step from scratch at depth=6 (image_size=64).
 # 2026-05-13:
-#   - depth 7 -> 6: quarters quadtree node count, allows bs>=4 instead of bs=1
+#   - depth 7 -> 6: quarters quadtree node count
+#   - sparse EdgeTypedGraphConv: avoids per-edge W gather, ~512x peak drop
 #   - drop warm-start (v1 ckpt was depth=7, shape mismatch)
-#   - bs 1 -> 8 (memory permits now)
+#   - bs=4 (safe choice — bs=8 might still OOM in edge cases; bump up later
+#     if first run confirms headroom)
 seed: 42
-batch_size: 8
+batch_size: 4
 num_workers: 4
 learning_rate: 1.0e-4
 weight_decay: 0.0
