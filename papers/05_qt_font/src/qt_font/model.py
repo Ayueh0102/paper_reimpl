@@ -218,15 +218,20 @@ class EdgeTypedGraphConv(nn.Module):
     ) -> torch.Tensor:
         out = x @ self.self_weight  # (N, out_dim) — self loop
         if edge_index.numel() > 0:
-            src = edge_index[0]
-            dst = edge_index[1]
-            # Per-edge weight: gather W[edge_type] then matmul with x[src].
-            # Equivalent to (W_e · x_src) but in a vectorised way.
-            W_per_edge = self.edge_weights[edge_type]  # (E, in, out)
-            x_src = x[src]  # (E, in)
-            msg = torch.einsum("ei,eio->eo", x_src, W_per_edge)
-            # Scatter-add into the destination.
-            out.index_add_(0, dst, msg)
+            # Sparse impl: process each edge_type in turn so we never
+            # materialise the per-edge weight tensor (E, in_dim, out_dim).
+            # Each per-type matmul is (E_t, in) @ (in, out) → (E_t, out)
+            # — peak intermediate ~ E_t * out, vs the dense E * in * out.
+            # For depth=7 (16k+ edges) this drops peak memory by ~in_dim×.
+            for et in range(self.n_edge_types):
+                mask = edge_type == et
+                if not bool(mask.any()):
+                    continue
+                sub_src = edge_index[0][mask]
+                sub_dst = edge_index[1][mask]
+                x_sub = x[sub_src]                       # (E_t, in_dim)
+                msg = x_sub @ self.edge_weights[et]      # (E_t, out_dim)
+                out.index_add_(0, sub_dst, msg)
         return out + self.bias
 
 
