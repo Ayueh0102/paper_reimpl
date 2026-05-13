@@ -31,7 +31,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from if_font.dataset import _IFFontTTFAdapter, IFFontCollate
 from if_font.ids import IDSTokenizer
-from if_font.model import IFFontConfig, build_if_font
+from if_font.model import IFFontConfig, VQTokenizerConfig, build_if_font
 from paper_reimpl_shared.data.ttf_pair_dataset import TTFCrossFontPairDataset
 
 
@@ -65,7 +65,14 @@ def main() -> int:
 
     print(f"[03-sample] loading ckpt {args.ckpt}")
     blob = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-    cfg = IFFontConfig(**blob["cfg"]) if not isinstance(blob["cfg"], IFFontConfig) else blob["cfg"]
+    cfg_dict = blob["cfg"]
+    if isinstance(cfg_dict, dict):
+        vq_dict = cfg_dict.get("vq")
+        if isinstance(vq_dict, dict):
+            cfg_dict = {**cfg_dict, "vq": VQTokenizerConfig(**vq_dict)}
+        cfg = IFFontConfig(**cfg_dict)
+    else:
+        cfg = cfg_dict
     model = build_if_font(cfg)
     miss, unexp = model.load_state_dict(blob["model"], strict=False)
     print(f"[03-sample] state_dict loaded (missing={len(miss)} unexpected={len(unexp)})")
