@@ -3,7 +3,7 @@
 # (quadtree depth=7 forward is much slower than other papers' U-Net).
 seed: 42
 batch_size: 1
-num_workers: 0
+num_workers: 4
 learning_rate: 1.0e-4
 weight_decay: 0.0
 grad_clip: 1.0
