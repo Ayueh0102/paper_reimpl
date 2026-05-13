@@ -1,4 +1,6 @@
-# 05 Stage A v2 — 200k step warm-start from v1.
+# 05 Stage A v2 — 30k step warm-start from v1.
+# Cut from 200k to 30k after 200k attempt projected to take ~5 days
+# (quadtree depth=7 forward is much slower than other papers' U-Net).
 seed: 42
 batch_size: 1
 num_workers: 0
@@ -6,8 +8,8 @@ learning_rate: 1.0e-4
 weight_decay: 0.0
 grad_clip: 1.0
 max_epochs: 1000
-max_steps: 200000
-log_every: 2000
+max_steps: 30000
+log_every: 500
 ckpt_dir: papers/05_qt_font/outputs/stage_a_ttf_v2
 
 diffusion:
