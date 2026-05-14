@@ -80,7 +80,11 @@ def main() -> int:
         seed=args.seed,
         ensure_diff_source=True,
     )
-    ds = _DPFontTTFAdapter(inner=inner)
+    ds = _DPFontTTFAdapter(
+        inner=inner,
+        stroke_vocab_size=cfg.stroke_vocab_size,
+        stroke_seq_len=cfg.stroke_seq_len,
+    )
     print(f"[08-sample] dataset has {len(inner.font_ids)} fonts, {len(inner.chars)} chars")
 
     indices = random.sample(range(len(ds)), args.n)

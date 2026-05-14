@@ -102,7 +102,7 @@ def main() -> int:
         seed=args.seed,
         ensure_diff_source=True,
     )
-    ds = _VQFontTTFAdapter(inner=inner, max_refs=args.max_refs)
+    ds = _VQFontTTFAdapter(inner=inner)
     print(f"[04-sample] dataset has {len(inner.font_ids)} fonts, {len(inner.chars)} chars")
 
     indices = random.sample(range(len(ds)), args.n)

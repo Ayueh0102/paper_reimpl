@@ -74,7 +74,13 @@ def main() -> int:
     unet.to(device).eval()
 
     text_cfg = model_yaml.get("text_encoder", {})
-    text_encoder = build_text_encoder(text_cfg).to(device)
+    text_encoder = build_text_encoder(
+        use_bert=bool(text_cfg.get("use_bert", False)),
+        hidden_size=int(text_cfg.get("hidden_size", 768)),
+        max_length=int(text_cfg.get("max_length", 32)),
+        model_name=str(text_cfg.get("model_name", "bert-base-chinese")),
+        cache_dir=text_cfg.get("cache_dir"),
+    ).to(device)
     text_encoder.eval()
 
     diffusion = GaussianDiffusion(
