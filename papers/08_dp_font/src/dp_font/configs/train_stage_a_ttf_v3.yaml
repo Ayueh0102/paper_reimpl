@@ -3,7 +3,7 @@
 # finer refinement. bs=32 nw=8 + persistent_workers for higher GPU util.
 seed: 42
 batch_size: 32
-num_workers: 8
+num_workers: 0  # Windows spawn + _worker_init_fn_factory closure -> pickle fail; nw=0 for now
 lr: 1.0e-5
 beta1: 0.9
 beta2: 0.999
