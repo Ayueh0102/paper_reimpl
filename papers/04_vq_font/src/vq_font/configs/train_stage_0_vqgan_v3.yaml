@@ -1,0 +1,19 @@
+# 04 Stage 0 VQGAN v3 — 50k step simple-loss codebook pretrain.
+# Trains VQGAN tokenizer (encoder + decoder + 1024-entry codebook) with
+# only L1 recon + commitment loss (no LPIPS, no GAN). Produces a usable
+# tokenizer for the downstream Transformer stage at much lower wall time
+# than the full paper-faithful setup.
+stage: vqgan
+seed: 42
+batch_size: 32
+num_workers: 8
+g_lr: 1.0e-4
+d_lr: 1.0e-4
+adam_betas: [0.9, 0.999]
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 1
+max_steps: 50000
+log_every: 1000
+simple_loss: true
+ckpt_dir: papers/04_vq_font/outputs/stage_0_vqgan_v3

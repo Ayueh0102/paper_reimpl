@@ -1,0 +1,18 @@
+# 04 Stage A v3 — 200k step Transformer training warm-start from
+# Stage 0 VQGAN v3 ckpt (which has a real-trained codebook, unlike v2
+# which had random-init VQGAN that caused gray-sample failure).
+stage: transformer
+seed: 42
+batch_size: 32
+num_workers: 8
+g_lr: 1.0e-4
+learning_rate: 1.0e-4
+adam_betas: [0.9, 0.999]
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 1000
+max_steps: 200000
+log_every: 2000
+freeze_vqgan: partial
+vqgan_ckpt: papers/04_vq_font/outputs/stage_0_vqgan_v3/vqgan_last.pt
+ckpt_dir: papers/04_vq_font/outputs/stage_a_ttf_v3
