@@ -237,13 +237,17 @@ def main(
         manifest_override=args.manifest,
     )
     batch_size = int(train_cfg.get("batch_size", 2))
+    nw = int(train_cfg.get("num_workers", 0))
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=not args.dry_run,
-        num_workers=int(train_cfg.get("num_workers", 0)),
+        num_workers=nw,
         collate_fn=collate_prompt_batch,
         drop_last=False,
+        persistent_workers=(nw > 0),
+        pin_memory=True,
+        prefetch_factor=4 if nw > 0 else None,
     )
 
     # ------------------------------------------------------------------ model

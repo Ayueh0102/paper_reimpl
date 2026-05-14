@@ -179,7 +179,14 @@ def _build_synthetic_loader(
         seed=int(data_cfg.get("seed", 0)),
     )
     ds = build_dataset(syn_cfg)
-    return DataLoader(ds, batch_size=batch_size, num_workers=num_workers)
+    return DataLoader(
+        ds,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        persistent_workers=(num_workers > 0),
+        pin_memory=True,
+        prefetch_factor=4 if num_workers > 0 else None,
+    )
 
 
 def main(
@@ -240,12 +247,16 @@ def main(
             font_ids=data_cfg.get("font_ids"),
             script_categories=data_cfg.get("script_categories"),
         )
+        nw = int(train_cfg.get("num_workers", 0))
         loader = DataLoader(
             ttf_ds,
             batch_size=int(train_cfg.get("batch_size", 2)),
             shuffle=True,
-            num_workers=int(train_cfg.get("num_workers", 0)),
+            num_workers=nw,
             drop_last=False,
+            persistent_workers=(nw > 0),
+            pin_memory=True,
+            prefetch_factor=4 if nw > 0 else None,
         )
     else:  # pragma: no cover - placeholder
         raise NotImplementedError(

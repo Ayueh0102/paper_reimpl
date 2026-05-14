@@ -257,6 +257,9 @@ def _build_dataloader(
         drop_last=False,
         num_workers=nw,
         collate_fn=collate,
+        persistent_workers=(nw > 0),
+        pin_memory=True,
+        prefetch_factor=4 if nw > 0 else None,
     )
 
 

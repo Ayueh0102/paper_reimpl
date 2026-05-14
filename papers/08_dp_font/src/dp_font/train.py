@@ -247,6 +247,9 @@ def _build_dataloader(
         collate_fn=collate,
         generator=generator,
         worker_init_fn=_worker_init_fn_factory(seed) if nw > 0 else None,
+        persistent_workers=(nw > 0),
+        pin_memory=True,
+        prefetch_factor=4 if nw > 0 else None,
     )
 
 

@@ -210,13 +210,17 @@ def main(
     batch_size = int(train_cfg.get("batch_size", 8))
     if args.dry_run:
         batch_size = min(batch_size, 2)
+    nw = int(train_cfg.get("num_workers", 0)) if not args.dry_run else 0
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=not args.dry_run,
-        num_workers=0,  # smoke / dry-run uses zero workers
+        num_workers=nw,
         collate_fn=build_collate(n_refs=n_refs),
         drop_last=False,
+        persistent_workers=(nw > 0),
+        pin_memory=True,
+        prefetch_factor=4 if nw > 0 else None,
     )
 
     # ------------------------------------------------------------------
