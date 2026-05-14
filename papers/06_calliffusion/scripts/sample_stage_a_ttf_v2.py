@@ -19,8 +19,11 @@ from paper_reimpl_shared.diffusion.gaussian import GaussianDiffusion
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from calliffusion.model import CalliffusionConfig, build_calliffusion, build_text_encoder
+import yaml
+
+from calliffusion.model import CalliffusionUNetConfig, build_unet_from_yaml
 from calliffusion.sample import sample_prompts
+from calliffusion.text import build_text_encoder
 from paper_reimpl_shared.data.ttf_pair_dataset import TTFCrossFontPairDataset
 
 
@@ -49,20 +52,33 @@ def main() -> int:
     random.seed(args.seed)
 
     print(f"[06-sample] loading ckpt {args.ckpt}")
+    model_yaml = yaml.safe_load((ROOT / "src" / "calliffusion" / "configs" / "model.yaml").read_text())
+    unet_raw = model_yaml.get("unet", {})
+    cfg = CalliffusionUNetConfig(
+        image_size=int(unet_raw.get("image_size", 64)),
+        in_channels=int(unet_raw.get("in_channels", 1)),
+        out_channels=int(unet_raw.get("out_channels", 1)),
+        base_channels=int(unet_raw.get("base_channels", 64)),
+        channel_mult=list(unet_raw.get("channel_mult", [1, 2, 4, 4])),
+        num_res_blocks=int(unet_raw.get("num_res_blocks", 1)),
+        time_emb_dim=int(unet_raw.get("time_emb_dim", 256)),
+        context_dim=int(unet_raw.get("context_dim", 768)),
+        num_heads=int(unet_raw.get("num_heads", 8)),
+        dropout=float(unet_raw.get("dropout", 0.0)),
+    )
+    unet = build_unet_from_yaml({"unet": unet_raw})
     blob = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-    cfg_dict = blob.get("cfg")
-    cfg = cfg_dict if isinstance(cfg_dict, CalliffusionConfig) else CalliffusionConfig(**cfg_dict)
-    unet = build_calliffusion(cfg)
-    state = blob["model"] if "model" in blob else blob
+    state = blob["model"] if isinstance(blob, dict) and "model" in blob else blob
     miss, unexp = unet.load_state_dict(state, strict=False)
     print(f"[06-sample] U-Net state: missing={len(miss)} unexpected={len(unexp)}")
     unet.to(device).eval()
 
-    text_encoder = build_text_encoder(cfg).to(device)
+    text_cfg = model_yaml.get("text_encoder", {})
+    text_encoder = build_text_encoder(text_cfg).to(device)
     text_encoder.eval()
 
     diffusion = GaussianDiffusion(
-        timesteps=cfg.diffusion_timesteps,
+        timesteps=1000,
         beta_start=1e-4,
         beta_end=2e-2,
         beta_schedule="linear",

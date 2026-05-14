@@ -19,8 +19,7 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from qt_font.diffusion import D3PMUniform
-from qt_font.model import QTFontConfig, build_qt_font
+from qt_font.model import D3PMUniform, QTFontConfig, build_qt_font
 from qt_font.sample import sample_image
 from paper_reimpl_shared.data.ttf_pair_dataset import TTFCrossFontPairDataset
 

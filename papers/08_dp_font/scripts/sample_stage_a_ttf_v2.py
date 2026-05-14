@@ -61,7 +61,7 @@ def main() -> int:
     model.to(device).eval()
 
     diffusion = GaussianDiffusion(
-        timesteps=cfg.diffusion_timesteps,
+        timesteps=1000,
         beta_start=1e-4,
         beta_end=2e-2,
         beta_schedule="cosine",

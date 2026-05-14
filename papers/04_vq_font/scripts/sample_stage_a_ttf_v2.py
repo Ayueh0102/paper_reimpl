@@ -19,8 +19,10 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+import yaml
+
 from vq_font.dataset import _VQFontTTFAdapter
-from vq_font.model import VQFontConfig, build_vq_font
+from vq_font.model import VQFontConfig, VQGANConfig, TransformerConfig, build_vq_font
 from vq_font.sample import sample_vq_font
 from paper_reimpl_shared.data.ttf_pair_dataset import TTFCrossFontPairDataset
 
@@ -33,11 +35,34 @@ def _denorm(t: torch.Tensor) -> np.ndarray:
     return arr
 
 
-def _dict_to_cfg(cfg_dict):
-    """Reconstruct nested dataclasses from torch.save'd dict."""
-    if isinstance(cfg_dict, VQFontConfig):
-        return cfg_dict
-    return VQFontConfig(**cfg_dict)
+def _load_cfg_from_yaml(yaml_path: Path) -> VQFontConfig:
+    raw = yaml.safe_load(yaml_path.read_text())
+    vq_raw = raw.get("vqgan", {})
+    tr_raw = raw.get("transformer", {})
+    vqgan_cfg = VQGANConfig(
+        image_size=int(vq_raw.get("image_size", 128)),
+        in_channels=int(vq_raw.get("in_channels", 1)),
+        base_channels=int(vq_raw.get("base_channels", 32)),
+        channel_mult=tuple(vq_raw.get("channel_mult", [1, 1, 2, 4])),
+        z_channels=int(vq_raw.get("z_channels", 256)),
+        embed_dim=int(vq_raw.get("embed_dim", 256)),
+        num_embeddings=int(vq_raw.get("num_embeddings", 1024)),
+        commitment_weight=float(vq_raw.get("commitment_weight", 0.25)),
+        num_res_blocks=int(vq_raw.get("num_res_blocks", 3)),
+        dropout=float(vq_raw.get("dropout", 0.0)),
+    )
+    tr_cfg = TransformerConfig(
+        latent_resolution=int(tr_raw.get("latent_resolution", 16)),
+        embed_dim=int(tr_raw.get("embed_dim", 256)),
+        num_blocks=int(tr_raw.get("num_blocks", 15)),
+        num_heads=int(tr_raw.get("num_heads", 8)),
+        mlp_ratio=float(tr_raw.get("mlp_ratio", 2.0)),
+        dropout=float(tr_raw.get("dropout", 0.0)),
+        num_refs=int(tr_raw.get("num_refs", 3)),
+        codebook_size=int(tr_raw.get("codebook_size", 1024)),
+        num_structures=int(tr_raw.get("num_structures", 13)),
+    )
+    return VQFontConfig(vqgan=vqgan_cfg, transformer=tr_cfg)
 
 
 def main() -> int:
@@ -58,10 +83,10 @@ def main() -> int:
     random.seed(args.seed)
 
     print(f"[04-sample] loading ckpt {args.ckpt}")
+    cfg = _load_cfg_from_yaml(ROOT / "src" / "vq_font" / "configs" / "model.yaml")
     blob = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-    cfg = _dict_to_cfg(blob.get("cfg"))
     model = build_vq_font(cfg)
-    state = blob["model"] if "model" in blob else blob
+    state = blob["model"] if isinstance(blob, dict) and "model" in blob else blob
     miss, unexp = model.load_state_dict(state, strict=False)
     print(f"[04-sample] missing={len(miss)} unexpected={len(unexp)}")
     model.to(device).eval()
