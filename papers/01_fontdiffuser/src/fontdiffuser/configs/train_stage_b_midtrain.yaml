@@ -4,17 +4,17 @@
 # writer-id classification.
 seed: 42
 batch_size: 16
-num_workers: 2
+num_workers: 0
 learning_rate: 5.0e-5
 weight_decay: 0.0
 grad_clip: 1.0
 max_epochs: 1
-max_steps: 20000
+max_steps: 5000
 log_every: 100
 cfg_drop_prob: 0.1
 scr_weight: 0.1
 scr_embed_dim: 128
-ckpt_dir: experiments/01_fontdiffuser/outputs/stage_b
+ckpt_dir: papers/01_fontdiffuser/outputs/stage_b
 
 diffusion:
   timesteps: 1000

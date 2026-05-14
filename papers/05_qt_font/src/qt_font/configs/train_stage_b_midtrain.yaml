@@ -8,11 +8,11 @@ num_workers: 0
 learning_rate: 5.0e-5
 weight_decay: 0.0
 grad_clip: 1.0
-grad_accum: 64                # effective batch 256
+grad_accum: 16                # effective batch 64
 max_epochs: 5
-max_steps: 6000
-log_every: 50
-ckpt_dir: experiments/05_qt_font/outputs/stage_b
+max_steps: 5000
+log_every: 100
+ckpt_dir: papers/05_qt_font/outputs/stage_b
 
 diffusion:
   timesteps: 1000

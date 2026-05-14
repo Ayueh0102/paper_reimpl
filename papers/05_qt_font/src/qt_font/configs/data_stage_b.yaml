@@ -2,13 +2,11 @@
 #
 # Bumps writer/char vocab sizes to match the Ernantang split summary:
 # 24 writers / ~84 units / ~4659 chars. Still synthetic in Phase 1.
-source: synthetic
-synthetic_length: 256
-max_refs: 4                           # mid-train can use up to 4 refs per query
+source: manifest
+manifest: a_main_clean_split_character_disjoint_global_coverage.jsonl
+max_refs: 1                           # depth=6 quadtree memory tight; 1 ref only
 writer_vocab_size: 24
 char_vocab_size: 4659
 script_vocab_size: 5
 seed: 1024
-
-manifest: b_midtrain_writers24.jsonl
-content_channels: [bitmap, sdf]
+content_channels: [bitmap]

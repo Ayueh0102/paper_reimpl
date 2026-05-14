@@ -4,6 +4,6 @@
 # Smoke manifest used as default so dry-run does not require the full
 # manifest snapshot.
 source: manifest
-manifest: a_main_clean_smoke_a1.jsonl
+manifest: a_main_clean_split_character_disjoint_global_coverage.jsonl
 content_channels: [bitmap, skeleton]   # PINN nib-motion reads skeleton
 max_refs: 0
