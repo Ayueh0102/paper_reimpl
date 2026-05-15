@@ -22,6 +22,7 @@ TRANSFERS=(
   "D:/Char/ayueh/paper_reimpl/repo/papers/04_vq_font/outputs/stage_b_long/sample_grid_ernantang.png|/tmp/04_sb_ernantang.png"
   "D:/Char/ayueh/paper_reimpl/repo/papers/05_qt_font/outputs/stage_b/sample_grid_ernantang.png|/tmp/05_sb_ernantang.png"
   "D:/Char/ayueh/paper_reimpl/repo/papers/08_dp_font/outputs/stage_b_extra_long/sample_grid_ernantang.png|/tmp/08_sb_extra_long_sample.png"
+  "D:/Char/ayueh/paper_reimpl/repo/papers/08_dp_font/outputs/stage_b_extra_extra_long/sample_grid_ernantang.png|/tmp/08_sb_extra_extra_long_sample.png"
 )
 
 if ! command -v "$SSHPASS_BIN" >/dev/null 2>&1; then

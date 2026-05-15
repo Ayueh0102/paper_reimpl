@@ -17,6 +17,17 @@ uv run python -u scripts\sample_stage_b_ernantang.py ^
   --output outputs\stage_b_extra_long\sample_grid_ernantang.png ^
   --n 12 --device cuda:1 --image-size 80 --cfg-scale 2.0 >> "%LOG%" 2>&1
 
+echo === 08 SB extra-extra-long 400k ernantang sample === >> "%LOG%"
+if exist outputs\stage_b_extra_extra_long\dp_font_last.pt (
+  uv run python -u scripts\sample_stage_b_ernantang.py ^
+    --ckpt outputs\stage_b_extra_extra_long\dp_font_last.pt ^
+    --manifest "%MANIFEST%" --fonts-root "%FONTS%" ^
+    --output outputs\stage_b_extra_extra_long\sample_grid_ernantang.png ^
+    --n 12 --device cuda:1 --image-size 80 --cfg-scale 2.0 >> "%LOG%" 2>&1
+) else (
+  echo extra-extra-long ckpt not found, skipping >> "%LOG%"
+)
+
 echo === 01 FontDiffuser SB-long 50k ernantang sample === >> "%LOG%"
 cd /d %REPO%\papers\01_fontdiffuser
 uv run python -u scripts\sample_stage_b_ernantang.py ^

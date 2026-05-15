@@ -1,0 +1,22 @@
+# 08 SB extra-extra-long — another 200k on top of stage_b_extra_long (200k → 400k total).
+# Warm-start LR rule: same flat lr as parent run (5e-6 = lr/2 of extra-long since we're
+# already at a low-noise stage, going lower to preserve fine-grained writer features).
+seed: 42
+batch_size: 16
+num_workers: 0
+learning_rate: 5.0e-6
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 400
+max_steps: 200000
+log_every: 1000
+cfg_drop_prob: 0.1
+pinn_weight: 0.0
+ckpt_dir: papers/08_dp_font/outputs/stage_b_extra_extra_long
+
+diffusion:
+  timesteps: 1000
+  beta_start: 1.0e-4
+  beta_end: 2.0e-2
+  beta_schedule: cosine
+  prediction_target: epsilon

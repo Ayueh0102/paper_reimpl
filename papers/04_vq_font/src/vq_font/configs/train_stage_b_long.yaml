@@ -8,8 +8,8 @@ g_lr: 1.0e-5
 adam_betas: [0.0, 0.9]
 weight_decay: 0.0
 grad_clip: 1.0
-max_epochs: 50
-max_steps: 30000
+max_epochs: 200
+max_steps: 70000
 log_every: 500
 scheduler:
   type: step
