@@ -1,8 +1,7 @@
 @echo off
 chcp 65001 >nul
 setlocal
-REM Sunday-morning sample chain — re-sample 08/01/02 from their SB-long ckpts.
-REM 04 + 05 sample scripts don't exist yet (paper-specific architectures); skipped.
+REM Sunday-morning sample chain — re-sample 08/01/02/04/05 from their SB-long ckpts.
 set REPO=D:\Char\ayueh\paper_reimpl\repo
 set MANIFEST=D:\Char\ayueh\paper_reimpl\data_snapshot\splits\a_main_clean_split_character_disjoint_global_coverage_enriched.jsonl
 set FONTS=D:\Char\ayueh\paper_reimpl\data_snapshot\fonts_free
@@ -33,6 +32,22 @@ uv run python -u scripts\sample_stage_b_ernantang.py ^
   --manifest "%MANIFEST%" --fonts-root "%FONTS%" ^
   --output outputs\stage_b_long\sample_grid_ernantang.png ^
   --n 12 --device cuda:1 --cfg-scale 2.0 >> "%LOG%" 2>&1
+
+echo === 04 VQ-Font SB-long 30k ernantang sample === >> "%LOG%"
+cd /d %REPO%\papers\04_vq_font
+uv run python -u scripts\sample_stage_b_ernantang.py ^
+  --ckpt outputs\stage_b_long\transformer_last.pt ^
+  --manifest "%MANIFEST%" --fonts-root "%FONTS%" ^
+  --output outputs\stage_b_long\sample_grid_ernantang.png ^
+  --n 12 --device cuda:1 >> "%LOG%" 2>&1
+
+echo === 05 QT-Font SB ernantang sample === >> "%LOG%"
+cd /d %REPO%\papers\05_qt_font
+uv run python -u scripts\sample_stage_b_ernantang.py ^
+  --ckpt outputs\stage_b\qt_font_last.pt ^
+  --manifest "%MANIFEST%" --fonts-root "%FONTS%" ^
+  --output outputs\stage_b\sample_grid_ernantang.png ^
+  --n 12 --device cuda:1 --ddim-steps 50 >> "%LOG%" 2>&1
 
 echo === sample chain done === >> "%LOG%"
 endlocal
