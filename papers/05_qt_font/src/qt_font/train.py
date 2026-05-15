@@ -258,9 +258,39 @@ def main(
             pin_memory=True,
             prefetch_factor=4 if nw > 0 else None,
         )
+    elif source == "manifest":
+        from pathlib import Path as _P
+        from .dataset import build_manifest_dataset
+
+        manifest_name = data_cfg.get("manifest")
+        if not manifest_name:
+            raise ValueError(
+                "data_cfg must contain `manifest: <file name>` when source=manifest"
+            )
+        manifest_path = paths.manifest_root / str(manifest_name)
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"manifest missing: {manifest_path}")
+        content_channels_list = list(data_cfg.get("content_channels", ["bitmap"]))
+        manifest_ds = build_manifest_dataset(
+            manifest_path=manifest_path,
+            image_size=1 << qt_cfg.depth,
+            content_channels=content_channels_list,
+            max_refs=int(data_cfg.get("max_refs", 0)),
+        )
+        nw = int(train_cfg.get("num_workers", 0))
+        loader = DataLoader(
+            manifest_ds,
+            batch_size=int(train_cfg.get("batch_size", 2)),
+            shuffle=True,
+            num_workers=nw,
+            drop_last=False,
+            persistent_workers=(nw > 0),
+            pin_memory=True,
+            prefetch_factor=4 if nw > 0 else None,
+        )
     else:  # pragma: no cover - placeholder
         raise NotImplementedError(
-            f"Unknown source={source}; supported: synthetic, ttf, manifest (TBD)."
+            f"Unknown source={source}; supported: synthetic, ttf, manifest."
         )
 
     # Warm-start from --init-ckpt before optimizer is built so AdamW moments

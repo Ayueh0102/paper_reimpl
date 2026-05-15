@@ -200,18 +200,51 @@ def build_ttf_dataset(
     return _TTFPairAdapter(inner)
 
 
-class ManifestPlaceholder(Dataset):
-    """Stub for the manifest-backed Stage A/B/C dataset (Phase 3)."""
+class _ManifestAdapter(Dataset):
+    """Adapt :class:`CalligraphyJsonlDataset` to the schema QT-Font expects.
 
-    def __init__(self, *_, **__) -> None:
+    Legacy dataset emits ``ref_images`` (list of [1, H, W] tensors). 05's
+    train loop reads ``refs`` (stacked [N, 1, H, W]) plus the categorical ids.
+    """
+
+    def __init__(self, inner) -> None:
         super().__init__()
-        raise NotImplementedError(
-            "ManifestPlaceholder not implemented yet — use SyntheticDataset for "
-            "Phase 2 dry-runs and smoke tests."
-        )
+        self.inner = inner
 
-    def __len__(self) -> int:  # pragma: no cover
-        return 0
+    def __len__(self) -> int:
+        return len(self.inner)
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:  # pragma: no cover
-        raise NotImplementedError
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        s = self.inner[idx]
+        refs = s["ref_images"]
+        if isinstance(refs, list):
+            refs_t = torch.stack(refs, dim=0) if refs else torch.zeros(0, 1, self.inner.image_size, self.inner.image_size)
+        else:
+            refs_t = refs
+        return {
+            "image": s["image"],
+            "content": s["content"],
+            "refs": refs_t,
+            "char_id": torch.as_tensor(s["char_id"], dtype=torch.long),
+            "writer_id": torch.as_tensor(s["writer_id"], dtype=torch.long),
+            "script_id": torch.as_tensor(s["script_id"], dtype=torch.long),
+        }
+
+
+def build_manifest_dataset(
+    *,
+    manifest_path,
+    image_size: int,
+    content_channels,
+    max_refs: int = 0,
+) -> _ManifestAdapter:
+    """Real manifest-backed Stage B/C dataset for QT-Font."""
+    from paper_reimpl_shared.data.legacy import CalligraphyJsonlDataset
+
+    inner = CalligraphyJsonlDataset(
+        manifest_path,
+        image_size=image_size,
+        content_channels=list(content_channels) if not isinstance(content_channels, list) else content_channels,
+        max_refs=max_refs,
+    )
+    return _ManifestAdapter(inner)
