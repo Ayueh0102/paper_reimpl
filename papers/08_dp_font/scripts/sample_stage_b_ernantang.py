@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from dp_font.model import DPFontConfig, build_dp_font
 from dp_font.sample import sample_ddim
-from paper_reimpl_shared.data.ttf_pair_dataset import render_glyph, _array_to_tensor
+from paper_reimpl_shared.data.ttf_pair_dataset import render_glyph, _array_to_tensor, _ttf_path_for
 from paper_reimpl_shared.diffusion.gaussian import GaussianDiffusion
 
 
@@ -107,12 +107,14 @@ def main() -> int:
     print(f"[08-sb-sample] picked {len(picks)} pairs from {len(writers_seen)} distinct writers")
 
     source_font = args.source_font
+    source_ttf = _ttf_path_for(args.fonts_root, source_font)
+    print(f"[08-sb-sample] source font resolved to {source_ttf}")
     cells = []
     for i, r in enumerate(picks):
         char = str(r["char_id"])
         # Source: TTF kai render
         src_arr = render_glyph(
-            ttf_path=str(args.fonts_root / source_font / f"{source_font}.ttf"),
+            ttf_path=source_ttf,
             char=char, image_size=args.image_size, font_size_ratio=0.85,
         )
         src_t = _array_to_tensor(src_arr)
