@@ -12,12 +12,12 @@ adam_betas: [0.0, 0.9]
 weight_decay: 0.0
 grad_clip: 1.0
 max_epochs: 1
-max_steps: 50000
+max_steps: 5000
 log_every: 100
 scheduler:
   type: step
-  step_size: 10000
+  step_size: 1000
   gamma: 0.95
 freeze_vqgan: partial
-vqgan_ckpt: experiments/04_vq_font/outputs/stage_0_vqgan/vqgan_last.pt
-ckpt_dir: experiments/04_vq_font/outputs/stage_b_transformer
+vqgan_ckpt: papers/04_vq_font/outputs/stage_0_vqgan_v3/vqgan_last.pt
+ckpt_dir: papers/04_vq_font/outputs/stage_b
