@@ -1,5 +1,10 @@
 # Stage B — multi-writer fine-tune on Ernantang manifests.
+# Use the enriched split (server image_path + content_npz + label_ids), NOT
+# the legacy smoke jsonl which still has Mac paths embedded.
 source: manifest
-manifest: a_main_clean_smoke_a1.jsonl
+manifest: a_main_clean_split_character_disjoint_global_coverage_enriched.jsonl
 content_channels: [bitmap]
 max_refs: 3
+writer_vocab_size: 24
+char_vocab_size: 4659
+script_vocab_size: 5
