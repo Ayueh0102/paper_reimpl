@@ -5,5 +5,5 @@
 # manifest snapshot.
 source: manifest
 manifest: a_main_clean_split_character_disjoint_global_coverage_enriched.jsonl
-content_channels: [bitmap, skeleton]   # PINN nib-motion reads skeleton
+content_channels: [bitmap]             # Stage A v3 trained at 1 channel; PINN nib-motion falls back to pred glyph
 max_refs: 0
