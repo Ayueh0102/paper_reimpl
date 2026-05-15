@@ -7,8 +7,8 @@ num_workers: 0
 learning_rate: 5.0e-6
 weight_decay: 0.0
 grad_clip: 1.0
-max_epochs: 1000
-max_steps: 600000
+max_epochs: 2000
+max_steps: 1000000
 log_every: 1000
 cfg_drop_prob: 0.1
 pinn_weight: 0.0
