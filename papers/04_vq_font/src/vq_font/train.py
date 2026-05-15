@@ -647,6 +647,11 @@ def main(
     paths: BackendPaths,
 ) -> int:
     """Dispatch on ``train_cfg['stage']``."""
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        )
     stage = str(train_cfg.get("stage", "transformer")).lower()
     if stage in {"vqgan", "stage_0", "0"}:
         return _run_vqgan_stage(
