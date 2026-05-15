@@ -1,0 +1,20 @@
+# 04 VQ-Font Stage B-long: extend stage_b/transformer_last.pt by 30k steps.
+# Warm-start LR rule: lr/10 vs SB-midtrain.
+stage: transformer
+seed: 42
+batch_size: 32
+num_workers: 0
+g_lr: 1.0e-5
+adam_betas: [0.0, 0.9]
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 50
+max_steps: 30000
+log_every: 500
+scheduler:
+  type: step
+  step_size: 5000
+  gamma: 0.95
+freeze_vqgan: partial
+vqgan_ckpt: papers/04_vq_font/outputs/stage_0_vqgan_v3/vqgan_last.pt
+ckpt_dir: papers/04_vq_font/outputs/stage_b_long

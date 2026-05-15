@@ -1,0 +1,21 @@
+# 08 Stage B v3 — extend PINN=0 50k ckpt by another 150k steps (200k total).
+# PINN off because the 50k ablation showed cleaner glyphs without it.
+seed: 42
+batch_size: 16
+num_workers: 0
+learning_rate: 1.0e-5
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 200
+max_steps: 150000
+log_every: 1000
+cfg_drop_prob: 0.1
+pinn_weight: 0.0
+ckpt_dir: papers/08_dp_font/outputs/stage_b_extra_long
+
+diffusion:
+  timesteps: 1000
+  beta_start: 1.0e-4
+  beta_end: 2.0e-2
+  beta_schedule: cosine
+  prediction_target: epsilon
