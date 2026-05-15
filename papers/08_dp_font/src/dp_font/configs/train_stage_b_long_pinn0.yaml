@@ -1,0 +1,22 @@
+# 08 Stage B v2 ablation — PINN OFF 50k step from Stage A v3 ckpt.
+# Same setup as train_stage_b_long.yaml but pinn_weight=0 to measure
+# the marginal contribution of PINN losses on ernantang real data.
+seed: 42
+batch_size: 16
+num_workers: 0
+learning_rate: 5.0e-5
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 50
+max_steps: 50000
+log_every: 500
+cfg_drop_prob: 0.1
+pinn_weight: 0.0
+ckpt_dir: papers/08_dp_font/outputs/stage_b_long_pinn0
+
+diffusion:
+  timesteps: 1000
+  beta_start: 1.0e-4
+  beta_end: 2.0e-2
+  beta_schedule: cosine
+  prediction_target: epsilon

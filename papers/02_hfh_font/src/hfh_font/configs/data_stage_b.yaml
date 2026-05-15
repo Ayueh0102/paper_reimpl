@@ -3,7 +3,7 @@ image_size: 128
 n_refs: 4
 content_channels: [bitmap, sdf, skeleton]
 source: manifest
-manifest: a_main_clean_split_character_disjoint_global_coverage.jsonl
+manifest: a_main_clean_split_character_disjoint_global_coverage_enriched.jsonl
 synthetic_length: 32
 synthetic_writer_vocab: 24
 synthetic_style_vocab: 32

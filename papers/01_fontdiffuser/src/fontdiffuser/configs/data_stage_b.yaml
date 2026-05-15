@@ -6,6 +6,6 @@
 # so dry-run + lab-server entrypoint both load without manual editing; promote
 # to a_main_clean_split_unit_disjoint.jsonl (or similar) before real Stage B.
 source: manifest
-manifest: a_main_clean_split_character_disjoint_global_coverage.jsonl
+manifest: a_main_clean_split_character_disjoint_global_coverage_enriched.jsonl
 content_channels: [bitmap]
 max_refs: 1

@@ -1,0 +1,26 @@
+# 08 Stage B v2 — 50k step continuation from current 4299-step Stage B ckpt.
+# Lower LR to avoid destroying learned features (warm-start LR rule).
+seed: 42
+batch_size: 16
+num_workers: 0
+learning_rate: 1.0e-5
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 50
+max_steps: 50000
+log_every: 500
+cfg_drop_prob: 0.1
+pinn_weight: 0.05
+pinn_weights:
+  weight_diffusion: 1.0
+  weight_nib: 1.0
+  weight_continuity: 0.5
+  nu: 1.0
+ckpt_dir: papers/08_dp_font/outputs/stage_b_long
+
+diffusion:
+  timesteps: 1000
+  beta_start: 1.0e-4
+  beta_end: 2.0e-2
+  beta_schedule: cosine
+  prediction_target: epsilon
