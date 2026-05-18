@@ -198,6 +198,11 @@ def main(
     paths,
 ) -> int:
     """Entry called from ``paper_reimpl_shared.runner.entrypoint``."""
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        )
     seed = int(train_cfg.get("seed", 42))
     _seed_everything(seed)
 
