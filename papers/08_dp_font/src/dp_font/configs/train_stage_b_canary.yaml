@@ -1,0 +1,20 @@
+# 08 Stage B canary — 1500 steps, verify writer-balanced sampler with new manifest.
+seed: 42
+batch_size: 16
+num_workers: 0
+learning_rate: 1.0e-5
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 5
+max_steps: 1500
+log_every: 100
+cfg_drop_prob: 0.1
+pinn_weight: 0.0
+ckpt_dir: papers/08_dp_font/outputs/stage_b_canary
+
+diffusion:
+  timesteps: 1000
+  beta_start: 1.0e-4
+  beta_end: 2.0e-2
+  beta_schedule: cosine
+  prediction_target: epsilon

@@ -1,0 +1,17 @@
+# 04 Stage 0 VQGAN canary — 1500 steps, verify codebook gradient actually updates.
+# After the optimizer-fix landed (codebook now in opt param group), this canary
+# must show codebook embedding std > 0.005 (vs init ~0.0006) by step 1500.
+stage: vqgan
+seed: 42
+batch_size: 32
+num_workers: 0
+g_lr: 1.0e-4
+d_lr: 1.0e-4
+adam_betas: [0.9, 0.999]
+weight_decay: 0.0
+grad_clip: 1.0
+max_epochs: 1
+max_steps: 1500
+log_every: 100
+simple_loss: true
+ckpt_dir: papers/04_vq_font/outputs/stage_0_vqgan_canary
