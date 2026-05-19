@@ -144,11 +144,13 @@ def vqgan_compute_loss(
     recon_weight: float = 1.0,
     vq_weight: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """Pure L1 + commitment loss (legacy helper, kept for smoke tests).
+    """Pure L1 + VQ codebook/commitment loss (legacy helper for smoke tests).
 
     The full Stage 0 trainer uses :class:`VQLPIPSWithDiscriminator` directly;
     this helper preserves the simpler single-loss surface the smoke test
-    relies on (no discriminator weights, no LPIPS download).
+    relies on (no discriminator weights, no LPIPS download). ``out.vq_loss``
+    includes both the embedding/codebook loss and encoder commitment loss,
+    so the codebook still receives gradient on the simple-loss path.
     """
     x = batch["image"]
     out = model(x)
@@ -322,6 +324,37 @@ def _get_last_layer(model: VQGAN) -> torch.Tensor:
     return model.decoder.out_conv.conv.weight
 
 
+def _vqgan_generator_parameters(model: VQGAN) -> list[torch.nn.Parameter]:
+    """Return Stage-0 generator params, with codebook coverage asserted."""
+    modules: tuple[torch.nn.Module, ...] = (
+        model.encoder,
+        model.decoder,
+        model.codebook,
+        model.pre_quant,
+        model.post_quant,
+    )
+    params: list[torch.nn.Parameter] = []
+    seen: set[int] = set()
+    for module in modules:
+        for param in module.parameters():
+            if not param.requires_grad:
+                continue
+            param_id = id(param)
+            if param_id in seen:
+                continue
+            seen.add(param_id)
+            params.append(param)
+
+    codebook_params = [p for p in model.codebook.parameters() if p.requires_grad]
+    if not codebook_params:
+        raise RuntimeError("Stage 0 VQGAN codebook has no trainable parameters.")
+    param_ids = {id(p) for p in params}
+    missing_codebook = [p for p in codebook_params if id(p) not in param_ids]
+    if missing_codebook:
+        raise RuntimeError("Stage 0 VQGAN optimizer is missing codebook parameters.")
+    return params
+
+
 def _run_vqgan_stage(
     args: argparse.Namespace,
     *,
@@ -349,11 +382,11 @@ def _run_vqgan_stage(
         )
 
     # Build loss (LPIPS + Discriminator). ``simple_loss=True`` falls back to
-    # pure L1 + commitment for dry-runs / smoke (no LPIPS download).
+    # pure L1 + VQ codebook/commitment for dry-runs / smoke (no LPIPS download).
     simple_loss = bool(train_cfg.get("simple_loss", False)) or args.dry_run
     if simple_loss:
         loss_module: VQLPIPSWithDiscriminator | None = None
-        logger.info("[vq_font/vqgan] simple_loss=True — using L1 + commitment only")
+        logger.info("[vq_font/vqgan] simple_loss=True — using L1 + VQ codebook/commitment")
     else:
         loss_module = VQLPIPSWithDiscriminator(_vqgan_loss_cfg_from_yaml(train_cfg)).to(device)
 
@@ -367,15 +400,7 @@ def _run_vqgan_stage(
     g_lr = float(train_cfg.get("g_lr", train_cfg.get("learning_rate", 4.5e-6)))
     d_lr = float(train_cfg.get("d_lr", g_lr))
     betas = _parse_adam_betas(train_cfg, default=(0.5, 0.9))
-    g_params = (
-        list(model.encoder.parameters())
-        + list(model.decoder.parameters())
-        + list(model.codebook.parameters())
-        + (list(model.pre_quant.parameters()) if isinstance(model.pre_quant, torch.nn.Module)
-           and any(True for _ in model.pre_quant.parameters()) else [])
-        + (list(model.post_quant.parameters()) if isinstance(model.post_quant, torch.nn.Module)
-           and any(True for _ in model.post_quant.parameters()) else [])
-    )
+    g_params = _vqgan_generator_parameters(model)
     optim_g = torch.optim.Adam(g_params, lr=g_lr, betas=betas,
                                weight_decay=float(train_cfg.get("weight_decay", 0.0)))
     if loss_module is not None:
@@ -409,7 +434,7 @@ def _run_vqgan_stage(
             x = batch["image"]
 
             if loss_module is None:
-                # Simple-loss path (L1 + commitment).
+                # Simple-loss path (L1 + VQ codebook/commitment).
                 optim_g.zero_grad(set_to_none=True)
                 loss, log = vqgan_compute_loss(
                     model=model, batch=batch, recon_weight=recon_w, vq_weight=vq_w

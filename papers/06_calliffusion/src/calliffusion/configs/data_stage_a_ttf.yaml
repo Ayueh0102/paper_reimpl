@@ -1,7 +1,7 @@
 # 06 Stage A — TTF cross-font pretrain via shared TTFCrossFontPairDataset.
 # Prompts are synthesised as "{char} {script_name} {font_id}" per sample.
 source: ttf
-fonts_root: D:\Char\ayueh\paper_reimpl\data_snapshot\fonts_free
+# fonts_root defaults to <PR_DATA_ROOT>/fonts_free, or BackendPaths' data root.
 font_size_ratio: 0.85
 ttf_epoch_length: 20000
 cjk_start: 0x4E00

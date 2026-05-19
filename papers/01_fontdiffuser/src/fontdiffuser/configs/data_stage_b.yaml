@@ -9,3 +9,5 @@ source: manifest
 manifest: a_main_clean_split_character_disjoint_global_coverage_enriched.jsonl
 content_channels: [bitmap]
 max_refs: 1
+sampling:
+  mode: writer_balanced

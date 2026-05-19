@@ -1,0 +1,55 @@
+# 07 Stage A — TTF cross-font pretraining via 02_hfh_font's TinyVAE encoder.
+#
+# Moyun is a latent diffusion paper (4ch 32x32 latents). To pretrain on TTF
+# fonts we render glyphs at ``render_image_size`` pixels, then encode through
+# the 02 TinyVAE to land in the latent space the Moyun backbone expects
+# (= model.image_size).
+#
+# The VAE ckpt lives in 02_hfh_font's outputs. If it doesn't exist locally
+# the dataset falls back to a fresh-init VAE with a printed WARNING so the
+# dry-run still constructs. DO NOT train without a real VAE.
+#
+# fonts_root resolves to <PR_DATA_ROOT>/fonts_free (or BackendPaths' default).
+source: ttf
+
+# Pixel-side renderer geometry (input to the VAE).
+# 128px render -> /4 down -> 32x32 latent (matches model.image_size).
+# Bump render_image_size to 256 + vae_down_factor to 8 if you want the
+# 02-paper-default VAE that ships with a down=8 trained ckpt.
+render_image_size: 128
+font_size_ratio: 0.85
+
+# Latent-side geometry. ``image_size`` in model.yaml is the latent side (32).
+# vae_down_factor = render_image_size / model.image_size. We keep it explicit
+# so the loader can sanity-check the geometry.
+latent_channels: 4
+vae_down_factor: 4
+vae_base_channels: 32
+vae_device: cpu                          # encode on CPU to stay DataLoader-safe
+
+# Path to the 02_hfh_font Stage-VAE checkpoint, relative to the 07_moyun paper
+# root. The dataset prints a WARNING + falls back to fresh-init if missing.
+vae_ckpt_path: ../02_hfh_font/outputs/stage_vae/vae_last.pt
+
+# Cross-font sampling knobs.
+ttf_epoch_length: 20000
+cjk_start: 0x4E00
+cjk_end: 0x9FFF
+ensure_diff_source: true
+seed: 42
+
+# Script category mapping for the 13 free CJK fonts in data/fonts_free/.
+script_categories:
+  lxgw_wenkai_regular: kai
+  lxgw_wenkai_light: kai
+  lxgw_wenkai_medium: kai
+  ma_shan_zheng: xing
+  long_cang: cao
+  liu_jian_mao_cao: cao
+  zcool_xiaowei: ming
+  zcool_kuaile: decor
+  zcool_qingke_huangyou: hei
+  noto_sans_sc: hei
+  noto_sans_tc: hei
+  noto_serif_sc: ming
+  noto_serif_tc: ming

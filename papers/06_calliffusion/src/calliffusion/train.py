@@ -14,6 +14,7 @@ matching the contract in ``paper_reimpl_shared.runner.entrypoint``.
 from __future__ import annotations
 
 import math
+import os
 import random
 from pathlib import Path
 from typing import Any
@@ -101,26 +102,46 @@ def build_dataset(
     synthetic: bool,
     data_cfg: dict[str, Any],
     manifest_root: Path,
+    paths=None,
     manifest_override: str | None = None,
 ) -> Dataset:
     image_size = int(data_cfg.get("image_size", 64))
     source = str(data_cfg.get("source", "manifest")).lower()
     if source == "ttf" and not synthetic:
         from pathlib import Path as _P
+
         from paper_reimpl_shared.data.ttf_pair_dataset import TTFCrossFontPairDataset
 
         fonts_root_cfg = data_cfg.get("fonts_root")
-        if not fonts_root_cfg:
-            raise ValueError(
-                "06 source=ttf requires data_cfg.fonts_root (absolute path) — "
-                "Calliffusion's build_dataset doesn't have a BackendPaths handle."
-            )
-        fonts_root = _P(str(fonts_root_cfg))
+        if fonts_root_cfg:
+            fonts_root = _P(str(fonts_root_cfg)).expanduser()
+            if not fonts_root.is_absolute():
+                data_root = os.environ.get("PR_DATA_ROOT")
+                if data_root:
+                    fonts_root = _P(data_root).expanduser() / fonts_root
+                elif paths is not None:
+                    fonts_root = _P(paths.ttf_root).parent / fonts_root
+                else:
+                    raise ValueError(
+                        "relative data_cfg.fonts_root requires BackendPaths or PR_DATA_ROOT."
+                    )
+        elif paths is not None:
+            fonts_root = _P(paths.ttf_root).parent / "fonts_free"
+        else:
+            data_root = os.environ.get("PR_DATA_ROOT")
+            if not data_root:
+                raise ValueError(
+                    "06 source=ttf requires BackendPaths or PR_DATA_ROOT to resolve fonts_free."
+                )
+            fonts_root = _P(data_root).expanduser() / "fonts_free"
         ratio = float(data_cfg.get("font_size_ratio", 0.85))
         cache_cfg = data_cfg.get("supported_chars_cache")
-        cache_path = _P(str(cache_cfg)) if cache_cfg else (
-            fonts_root / f".ttf_supported_chars_{image_size}px_{ratio}.json"
-        )
+        if cache_cfg:
+            cache_path = _P(str(cache_cfg)).expanduser()
+            if not cache_path.is_absolute():
+                cache_path = fonts_root.parent / cache_path
+        else:
+            cache_path = fonts_root / f".ttf_supported_chars_{image_size}px_{ratio}.json"
         inner = TTFCrossFontPairDataset(
             fonts_root=fonts_root,
             font_ids=data_cfg.get("font_ids"),
@@ -234,6 +255,7 @@ def main(
         synthetic=bool(args.synthetic),
         data_cfg=data_cfg,
         manifest_root=Path(paths.manifest_root),
+        paths=paths,
         manifest_override=args.manifest,
     )
     batch_size = int(train_cfg.get("batch_size", 2))

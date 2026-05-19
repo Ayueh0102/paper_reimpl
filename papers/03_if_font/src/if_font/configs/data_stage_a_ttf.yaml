@@ -1,12 +1,13 @@
 # 03 Stage A — TTF cross-font pretrain with IDS-derived tokens.
-# ids_lookup_path points at the local IDS table on the lab server.
+# ids_lookup_path is relative to PR_DATA_ROOT, or BackendPaths' data root
+# when PR_DATA_ROOT is unset.
 source: ttf
 font_size_ratio: 0.85
 ttf_epoch_length: 20000
 max_refs: 3
 cjk_start: 0x4E00
 cjk_end: 0x9FFF
-ids_lookup_path: D:\Char\ayueh\paper_reimpl\data_snapshot\ids\cns_unicode_ids.tsv
+ids_lookup_path: ids/cns_unicode_ids.tsv
 script_categories:
   lxgw_wenkai_regular: kai
   lxgw_wenkai_light: kai

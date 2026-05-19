@@ -216,6 +216,13 @@ learn from in Phase 2:
 
 ## Open questions / known limitations
 
+**Status label:** current 08 DP-Font should be treated as a
+paper-inspired baseline, not a faithful reproduction. The PINN terms below
+are differentiable surrogates for the paper's prose description; the paper
+notes available to Phase 1 did not provide PDE equations or weights. Do not
+compare this implementation's PINN-on/PINN-off numbers to paper headline
+metrics as if they were the same objective.
+
 1. The stroke-order, ink-intensity, and font-size fields are *placeholders*
    synthesised from a hash of char + writer. Real Stage B/C runs need to
    swap them with a stroke-order DB lookup and the actual Ernantang

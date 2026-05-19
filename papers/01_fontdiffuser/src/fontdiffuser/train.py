@@ -29,6 +29,7 @@ from paper_reimpl_shared.data.legacy import (
     collate_calligraphy_batch,
 )
 from paper_reimpl_shared.data.manifest import BackendPaths
+from paper_reimpl_shared.data.sampling import build_manifest_train_sampler
 from paper_reimpl_shared.diffusion.gaussian import GaussianDiffusion
 
 from .dataset import build_dataset
@@ -236,13 +237,24 @@ def _build_dataloader(
         nw = 0
     max_refs = int(data_cfg.get("max_refs", 1))
     collate = _CollateWithRefs(max_refs)
+    seed = int(train_cfg.get("seed", 42))
+    sampler = build_manifest_train_sampler(
+        dataset,
+        data_cfg=data_cfg,
+        train_cfg=train_cfg,
+        seed=seed,
+    )
+    generator = torch.Generator()
+    generator.manual_seed(seed)
     return DataLoader(
         dataset,
         batch_size=bs,
-        shuffle=True,
+        shuffle=(sampler is None),
+        sampler=sampler,
         drop_last=False,
         num_workers=nw,
         collate_fn=collate,
+        generator=generator,
         persistent_workers=(nw > 0),
         pin_memory=True,
         prefetch_factor=4 if nw > 0 else None,

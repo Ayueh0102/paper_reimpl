@@ -229,6 +229,7 @@ def main(
         )
     elif source == "ttf":
         from pathlib import Path as _P
+
         from .dataset import build_ttf_dataset
 
         fonts_root_cfg = data_cfg.get("fonts_root")
@@ -265,6 +266,7 @@ def main(
         )
     elif source == "manifest":
         from pathlib import Path as _P
+
         from .dataset import build_manifest_dataset
 
         manifest_name = data_cfg.get("manifest")
@@ -329,10 +331,15 @@ def main(
     logger.info("model params = %s", f"{sum(p.numel() for p in model.parameters()):,}")
     logger.info("qt_cfg = %s", asdict(qt_cfg))
     max_steps = int(train_cfg.get("max_steps", 10))
+    if args.dry_run:
+        max_steps = 1
     max_epochs = int(train_cfg.get("max_epochs", 1))
+    if args.dry_run:
+        max_epochs = max(1, max_epochs)
     log_every = int(train_cfg.get("log_every", 1))
     grad_clip = float(train_cfg.get("grad_clip", 1.0))
     grad_accum = max(1, int(train_cfg.get("grad_accum", 1)))
+    effective_grad_accum = 1 if args.dry_run else grad_accum
 
     ckpt_dir_raw = train_cfg.get("ckpt_dir")
     ckpt_dir = None
@@ -350,7 +357,7 @@ def main(
     micro = 0
     opt.zero_grad(set_to_none=True)
     done = False
-    for epoch in range(max_epochs):
+    for _epoch in range(max_epochs):
         if done:
             break
         for batch in loader:
@@ -358,9 +365,9 @@ def main(
             loss, log = compute_loss(model=model, diffusion=diffusion, batch=batch)
             # Mean-reduce across the accumulation cycle so the .step() gradient is
             # an unbiased estimate of the effective-batch gradient.
-            (loss / grad_accum).backward()
+            (loss / effective_grad_accum).backward()
             micro += 1
-            if micro >= grad_accum:
+            if micro >= effective_grad_accum:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 opt.step()
                 opt.zero_grad(set_to_none=True)

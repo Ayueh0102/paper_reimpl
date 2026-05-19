@@ -15,13 +15,14 @@ Phase 2 alignment to official `iffont/data/cn.py` + `modules/encoder.IDSEncoder`
   prepended to the target VQ tokens (official `nanogpt.GPT.forward`).
 
 The two vendored files live at:
-  ``~/Char/datasets/ids/cn_mainland/babelstone_cjk_ids.txt``
-  ``~/Char/datasets/ids/cn_mainland/ids_iffont.txt``
+  ``$PR_DATA_ROOT/ids/cn_mainland/babelstone_cjk_ids.txt``
+  ``$PR_DATA_ROOT/ids/cn_mainland/ids_iffont.txt``
 """
 
 from __future__ import annotations
 
 import itertools
+import os
 import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -70,8 +71,9 @@ SPECIAL_TOKENS: tuple[str, ...] = (PAD, BOS, EOS, UNK)
 # ======================================================================
 
 
-_DEFAULT_BABELSTONE_PATH = Path("~/Char/datasets/ids/cn_mainland/babelstone_cjk_ids.txt")
-_DEFAULT_IDS_IFFONT_PATH = Path("~/Char/datasets/ids/cn_mainland/ids_iffont.txt")
+_DEFAULT_IDS_ROOT = Path(os.environ.get("PR_DATA_ROOT", ".")) / "ids" / "cn_mainland"
+_DEFAULT_BABELSTONE_PATH = _DEFAULT_IDS_ROOT / "babelstone_cjk_ids.txt"
+_DEFAULT_IDS_IFFONT_PATH = _DEFAULT_IDS_ROOT / "ids_iffont.txt"
 
 
 _BABELSTONE_CH_RE = re.compile(r"U\+[0-9A-Z]+\t(.).*?\t\^(.+?)\$")

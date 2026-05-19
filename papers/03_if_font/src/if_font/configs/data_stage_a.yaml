@@ -16,4 +16,4 @@ seed: 42
 
 manifest: a_main_clean_smoke_a0.jsonl
 content_channels: [bitmap]
-ids_lookup_path: ~/Char/datasets/ids/scripts/lookup_ids.py
+ids_lookup_path: ids/scripts/lookup_ids.py

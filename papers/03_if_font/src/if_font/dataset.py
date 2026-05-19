@@ -21,6 +21,7 @@ from __future__ import annotations
 import importlib.util
 import random
 import sys
+import warnings
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -60,12 +61,29 @@ def load_ids_lookup(path: str | Path | None) -> Callable[[str], str]:
     p = Path(path).expanduser()
     if not p.exists():
         return lambda _ch: ""
+    if p.suffix.lower() in {".tsv", ".txt"}:
+        mapping: dict[str, str] = {}
+        with p.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 2:
+                    parts = line.split(maxsplit=1)
+                if len(parts) >= 2:
+                    mapping[parts[0]] = parts[1]
+        return lambda ch: mapping.get(ch, "")
     spec = importlib.util.spec_from_file_location("if_font_user_lookup_ids", p)
     if spec is None or spec.loader is None:
         return lambda _ch: ""
     module = importlib.util.module_from_spec(spec)
     sys.modules["if_font_user_lookup_ids"] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        warnings.warn(f"failed to load IDS lookup script {p}: {exc}", stacklevel=2)
+        return lambda _ch: ""
     if not hasattr(module, "get_ids"):
         return lambda _ch: ""
     return module.get_ids  # type: ignore[no-any-return]
@@ -404,6 +422,7 @@ def build_dataset(
 
     if source == "ttf" and not use_synthetic:
         from pathlib import Path as _P
+
         from paper_reimpl_shared.data.ttf_pair_dataset import TTFCrossFontPairDataset
 
         fonts_root_cfg = data_cfg.get("fonts_root")

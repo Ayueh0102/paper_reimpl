@@ -29,7 +29,11 @@ from vq_font.model import (
     build_vqgan,
 )
 from vq_font.sample import sample_vq_font, sample_vqgan_recon
-from vq_font.train import transformer_compute_loss, vqgan_compute_loss
+from vq_font.train import (
+    _vqgan_generator_parameters,
+    transformer_compute_loss,
+    vqgan_compute_loss,
+)
 from vq_font.vqgan_loss import VQLPIPSLossConfig, VQLPIPSWithDiscriminator
 
 
@@ -65,7 +69,7 @@ def _tiny_transformer_cfg(vqgan_cfg: VQGANConfig, *, num_refs: int = 2) -> Trans
 
 
 def test_vqgan_stage_smoke() -> None:
-    """Stage 0: train the VQGAN end-to-end on a single tiny batch (L1 + commitment)."""
+    """Stage 0: train the VQGAN end-to-end on L1 + VQ codebook/commitment."""
     torch.manual_seed(0)
     image_size = 32
     batch = make_synthetic_batch(
@@ -101,6 +105,37 @@ def test_vqgan_stage_smoke() -> None:
     assert torch.isfinite(recon).all().item()
 
 
+def test_vqgan_codebook_updates_after_stage0_optimizer_step() -> None:
+    """Regression: Stage 0 optimizer must train the VQGAN codebook."""
+    torch.manual_seed(3)
+    image_size = 32
+    batch = make_synthetic_batch(
+        batch_size=2, image_size=image_size, in_channels=1, n_refs=0, device="cpu"
+    )
+    cfg = _tiny_vqgan_cfg(image_size)
+    model = build_vqgan(cfg)
+
+    generator_params = _vqgan_generator_parameters(model)
+    generator_param_ids = {id(p) for p in generator_params}
+    codebook_weight = model.codebook.codebook.weight
+    assert id(codebook_weight) in generator_param_ids
+
+    optim = torch.optim.Adam(generator_params, lr=1e-3, betas=(0.5, 0.9))
+    before = codebook_weight.detach().clone()
+    loss, _log = vqgan_compute_loss(model=model, batch=batch)
+    optim.zero_grad(set_to_none=True)
+    loss.backward()
+
+    assert codebook_weight.grad is not None
+    assert torch.isfinite(codebook_weight.grad).all().item()
+    assert codebook_weight.grad.abs().sum().item() > 0.0
+
+    optim.step()
+    delta = (codebook_weight.detach() - before).abs()
+    assert delta.sum().item() > 0.0, "codebook embedding did not change after optimizer step"
+    assert (delta.sum(dim=1) > 0).any().item(), "no selected codebook row was updated"
+
+
 def test_vqgan_full_loss_smoke() -> None:
     """Stage 0 with VQLPIPSWithDiscriminator — one G + D step, finite."""
     torch.manual_seed(7)
@@ -124,15 +159,11 @@ def test_vqgan_full_loss_smoke() -> None:
     loss_mod.train()
     model.train()
 
-    optim_g = torch.optim.Adam(
-        list(model.encoder.parameters())
-        + list(model.decoder.parameters())
-        + list(model.codebook.parameters()),
-        lr=1e-4, betas=(0.5, 0.9),
-    )
+    optim_g = torch.optim.Adam(_vqgan_generator_parameters(model), lr=1e-4, betas=(0.5, 0.9))
     optim_d = torch.optim.Adam(loss_mod.discriminator.parameters(), lr=1e-4, betas=(0.5, 0.9))
 
     # G step
+    codebook_before = model.codebook.codebook.weight.detach().clone()
     out = model(batch["image"])
     last_layer = model.decoder.out_conv.conv.weight
     g_loss, g_log = loss_mod(
@@ -142,7 +173,11 @@ def test_vqgan_full_loss_smoke() -> None:
     assert torch.isfinite(g_loss).item(), f"G loss not finite: {g_loss.item()}"
     optim_g.zero_grad(set_to_none=True)
     g_loss.backward()
+    cb_grad = model.codebook.codebook.weight.grad
+    assert cb_grad is not None and cb_grad.abs().sum().item() > 0.0
     optim_g.step()
+    codebook_delta = (model.codebook.codebook.weight.detach() - codebook_before).abs()
+    assert codebook_delta.sum().item() > 0.0
 
     # D step (re-forward to detach)
     with torch.no_grad():

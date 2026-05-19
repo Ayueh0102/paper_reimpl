@@ -175,12 +175,27 @@ def _model_cfg_from_yaml(model_cfg: dict[str, Any]) -> IFFontConfig:
     )
 
 
-def _build_ids_resolver(train_cfg: dict[str, Any]) -> IDSResolver | None:
+def _resolve_data_path(raw: str | Path | None, paths: BackendPaths) -> Path | None:
+    """Resolve paper-local data references through PR_DATA_ROOT / BackendPaths."""
+    if not raw:
+        return None
+    p = Path(str(raw)).expanduser()
+    if p.is_absolute():
+        return p
+    data_root = os.environ.get("PR_DATA_ROOT")
+    if data_root:
+        return Path(data_root).expanduser() / p
+    return paths.ttf_root.parent / p
+
+
+def _build_ids_resolver(train_cfg: dict[str, Any], paths: BackendPaths) -> IDSResolver | None:
     """Try to load BabelStone + ids_iffont. Return None if files absent."""
-    babel = train_cfg.get("babelstone_path") or "~/Char/datasets/ids/cn_mainland/babelstone_cjk_ids.txt"
-    iff = train_cfg.get("ids_iffont_path") or "~/Char/datasets/ids/cn_mainland/ids_iffont.txt"
-    bp = Path(babel).expanduser()
-    ip = Path(iff).expanduser()
+    babel = train_cfg.get("babelstone_path") or "ids/cn_mainland/babelstone_cjk_ids.txt"
+    iff = train_cfg.get("ids_iffont_path") or "ids/cn_mainland/ids_iffont.txt"
+    bp = _resolve_data_path(babel, paths)
+    ip = _resolve_data_path(iff, paths)
+    if bp is None or ip is None:
+        return None
     if not bp.exists() and not ip.exists():
         return None
     return IDSResolver.load(level="radical", babelstone_path=bp, ids_iffont_path=ip)
@@ -218,7 +233,7 @@ def _build_dataloader(
     tokenizer: IDSTokenizer,
     ids_resolver: IDSResolver | None,
 ) -> DataLoader:
-    ids_lookup = load_ids_lookup(data_cfg.get("ids_lookup_path"))
+    ids_lookup = load_ids_lookup(_resolve_data_path(data_cfg.get("ids_lookup_path"), paths))
     dataset = build_dataset(
         args=args,
         data_cfg=data_cfg,
@@ -295,7 +310,7 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
     _seed_everything(int(train_cfg.get("seed", 42)))
 
     cfg = _model_cfg_from_yaml(model_cfg)
-    ids_resolver = _build_ids_resolver(train_cfg)
+    ids_resolver = _build_ids_resolver(train_cfg, paths)
 
     tokenizer = IDSTokenizer.from_idc_only()
     if ids_resolver is not None:
@@ -371,18 +386,22 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
     optim = _configure_optimizers(model, lr=lr, weight_decay=weight_decay)
 
     max_epochs = int(train_cfg.get("max_epochs", 15))
+    if args.dry_run:
+        max_epochs = max(1, max_epochs)
     max_steps_yaml = int(train_cfg.get("max_steps", 1 if args.dry_run else 1_000_000))
     steps_per_epoch = max(1, len(loader))
     total_steps = min(max_steps_yaml, max_epochs * steps_per_epoch) if not args.dry_run else 1
 
     pct_start = 0.5 / max(1, max_epochs)
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optim,
-        max_lr=lr,
-        total_steps=max(2, total_steps),  # OneCycleLR needs >=2 steps
-        pct_start=min(0.5, max(1e-3, pct_start)),
-        final_div_factor=10.0 / 25.0,
-    )
+    scheduler = None
+    if not args.dry_run:
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optim,
+            max_lr=lr,
+            total_steps=max(2, total_steps),  # OneCycleLR needs >=2 steps
+            pct_start=min(0.5, max(1e-3, pct_start)),
+            final_div_factor=10.0 / 25.0,
+        )
 
     sup_cl_weight = float(train_cfg.get("sup_cl_weight", 0.5))
     grad_clip = float(train_cfg.get("grad_clip", 0.0))
@@ -419,7 +438,7 @@ def main(args, *, data_cfg, model_cfg, train_cfg, paths: BackendPaths) -> int:
             if grad_clip > 0.0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optim.step()
-            if step + 1 < scheduler.total_steps:
+            if scheduler is not None and step + 1 < scheduler.total_steps:
                 scheduler.step()
             # Cosine momentum schedule for MoCo (official: epoch / max_epochs).
             model.moco_wrapper.momentum_update(epoch / max(1, max_epochs))

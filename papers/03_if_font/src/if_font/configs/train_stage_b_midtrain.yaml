@@ -25,8 +25,8 @@ sup_cl_weight: 0.5
 moco_cache_size: 10
 
 # IDS resolver: BabelStone + ids_iffont (vendored).
-babelstone_path: ~/Char/datasets/ids/cn_mainland/babelstone_cjk_ids.txt
-ids_iffont_path: ~/Char/datasets/ids/cn_mainland/ids_iffont.txt
+babelstone_path: ids/cn_mainland/babelstone_cjk_ids.txt
+ids_iffont_path: ids/cn_mainland/ids_iffont.txt
 
 # Optional pretrained CompVis VQGAN path. Without it the model runs with a
 # random-weight stub (smoke-only — generated images will be noise).

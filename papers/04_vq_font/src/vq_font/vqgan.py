@@ -193,8 +193,10 @@ class VectorQuantize(nn.Module):
 
     Implements the standard VQ-VAE quantizer (Van den Oord 2017 §3) with
     Esser-style commitment + codebook losses surfaced as ``vq_loss`` so the
-    trainer can scale them. Mathematically identical to the
-    ``VectorQuantizer2`` used in the official taming impl (β=0.25).
+    trainer can scale them. The codebook is trained by the explicit
+    embedding loss below; there is no EMA update path. Mathematically
+    identical to the ``VectorQuantizer2`` used in the official taming impl
+    (β=0.25).
     """
 
     def __init__(self, num_embeddings: int, embed_dim: int, *, commitment_weight: float = 0.25) -> None:
@@ -226,13 +228,16 @@ class VectorQuantize(nn.Module):
         indices = torch.argmin(dists, dim=1)                     # [BHW]
         z_q_flat = self.codebook(indices)                         # [BHW, C]
 
+        # These two terms intentionally split gradients:
+        # * codebook_loss updates the selected embedding rows.
+        # * commitment_loss updates the encoder features.
         codebook_loss = F.mse_loss(z_q_flat, z_flat.detach())
         commitment_loss = F.mse_loss(z_flat, z_q_flat.detach())
         loss = codebook_loss + self.commitment_weight * commitment_loss
 
         # Straight-through: encoder gradient flows as identity.
-        z_q_flat = z_flat + (z_q_flat - z_flat).detach()
-        z_q = z_q_flat.reshape(b, h, w, c).permute(0, 3, 1, 2).contiguous()
+        z_q_st = z_flat + (z_q_flat - z_flat).detach()
+        z_q = z_q_st.reshape(b, h, w, c).permute(0, 3, 1, 2).contiguous()
         indices = indices.reshape(b, h, w)
         return z_q, indices, loss
 

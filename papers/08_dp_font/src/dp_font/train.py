@@ -29,6 +29,7 @@ from torch.utils.data import DataLoader
 
 from paper_reimpl_shared.config import resolve_path
 from paper_reimpl_shared.data.manifest import BackendPaths
+from paper_reimpl_shared.data.sampling import build_manifest_train_sampler
 from paper_reimpl_shared.diffusion.gaussian import GaussianDiffusion
 
 from .dataset import _DPFontCollate, build_dataset
@@ -238,10 +239,17 @@ def _build_dataloader(
     seed = int(train_cfg.get("seed", 42))
     generator = torch.Generator()
     generator.manual_seed(seed)
+    sampler = build_manifest_train_sampler(
+        dataset,
+        data_cfg=data_cfg,
+        train_cfg=train_cfg,
+        seed=seed,
+    )
     return DataLoader(
         dataset,
         batch_size=bs,
-        shuffle=True,
+        shuffle=(sampler is None),
+        sampler=sampler,
         drop_last=False,
         num_workers=nw,
         collate_fn=collate,

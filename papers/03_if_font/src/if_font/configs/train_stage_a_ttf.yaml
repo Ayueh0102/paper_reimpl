@@ -18,8 +18,8 @@ log_every: 50
 sup_cl_weight: 0.5
 
 # IDS resolver: BabelStone + ids_iffont (vendored).
-babelstone_path: ~/Char/datasets/ids/cn_mainland/babelstone_cjk_ids.txt
-ids_iffont_path: ~/Char/datasets/ids/cn_mainland/ids_iffont.txt
+babelstone_path: ids/cn_mainland/babelstone_cjk_ids.txt
+ids_iffont_path: ids/cn_mainland/ids_iffont.txt
 
 # Optional pretrained VQGAN path (e.g. ../checkpoints/vqgan_openImages_f8_n256).
 # Leave empty to use the random-weight stub (smoke-only).

@@ -314,3 +314,14 @@ New smoke tests added (5 total): `test_vqgan_stage_smoke`,
 `test_vqgan_full_loss_smoke` (VQLPIPS+Discriminator G+D step),
 `test_transformer_stage_smoke` (partial-freeze param-set check),
 `test_transformer_full_freeze_legacy_smoke`, `test_sample_pipeline`.
+
+## P0-A Stage 0 codebook training fix
+
+2026-05-19 follow-up: added an explicit Stage 0 generator-parameter helper
+that asserts trainable VQGAN codebook params are included before constructing
+the optimizer. The quantizer remains non-EMA VQ-VAE style: `codebook_loss`
+updates selected embedding rows, `commitment_loss` updates encoder features,
+and the straight-through reconstruction path remains identity-to-encoder.
+Added CPU smoke coverage that checks `vq_loss` gives finite non-zero gradient
+to `model.codebook.codebook.weight` and that one Stage 0 optimizer step changes
+at least one codebook row. `[guessed-because-paper-vague]`

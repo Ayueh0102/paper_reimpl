@@ -17,6 +17,7 @@ from typing import Any
 import numpy as np
 import torch
 from paper_reimpl_shared.data.manifest import BackendPaths
+from paper_reimpl_shared.data.sampling import build_manifest_train_sampler
 from paper_reimpl_shared.diffusion.gaussian import GaussianDiffusion
 from torch.utils.data import DataLoader
 
@@ -211,12 +212,22 @@ def main(
     if args.dry_run:
         batch_size = min(batch_size, 2)
     nw = int(train_cfg.get("num_workers", 0)) if not args.dry_run else 0
+    sampler = build_manifest_train_sampler(
+        dataset,
+        data_cfg=data_cfg,
+        train_cfg=train_cfg,
+        seed=seed,
+    )
+    generator = torch.Generator()
+    generator.manual_seed(seed)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=not args.dry_run,
+        shuffle=(sampler is None and not args.dry_run),
+        sampler=sampler,
         num_workers=nw,
         collate_fn=build_collate(n_refs=n_refs),
+        generator=generator,
         drop_last=False,
         persistent_workers=(nw > 0),
         pin_memory=True,
@@ -289,7 +300,7 @@ def main(
             p.requires_grad_(False)
 
     done = False
-    for epoch in range(max_epochs):
+    for _epoch in range(max_epochs):
         if done:
             break
         for batch in loader:
