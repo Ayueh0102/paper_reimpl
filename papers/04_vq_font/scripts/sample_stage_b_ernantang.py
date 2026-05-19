@@ -220,7 +220,9 @@ def main() -> int:
             # ref_glyphs: [1, R, 1, H, W] — repeat single ref to fill R slots
             single_ref = ref_t.unsqueeze(0).unsqueeze(0).to(device)  # [1, 1, H, W]
             ref_glyphs = single_ref.unsqueeze(1).expand(1, num_refs, 1, image_size, image_size).contiguous()
-            structure_id = torch.zeros(1, dtype=torch.long, device=device)
+            # Train.py defaults to structure_id=1 (atomic/full-map) when missing
+            # from batch — must match at inference or VQ-codes degenerate.
+            structure_id = torch.ones(1, dtype=torch.long, device=device)
 
             gen = sample_vq_font(
                 model=model,
